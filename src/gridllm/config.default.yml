@@ -97,8 +97,11 @@ mcp:
   max_tool_chars: 50000
   ignore:
   - .git
+  - .gitignore
+  - .gdbinit
   - .gridllm
   - .venv
+  - .vscode
   - __pycache__
   - node_modules
   - build
