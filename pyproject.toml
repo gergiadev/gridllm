@@ -1,0 +1,34 @@
+[project]
+name = "gridllm"
+version = "0.1.0"
+description = "A grid of LLM agents for analysing C and Assembly code"
+readme = "README.md"
+authors = [
+    { name = "Gerunda Gianluca", email = "ggerunda@ggsys.it" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "litellm>=1.96.0",
+    "mcp>=2.0.0",
+    "python-dotenv>=1.2.2",
+    "pydantic>=2.0",
+    "pyyaml>=6.0",
+    "tree-sitter>=0.24,<0.26",
+    "tree-sitter-php>=0.23",
+    "tree-sitter-c>=0.24",
+]
+
+[project.optional-dependencies]
+gui = [
+    "textual>=0.80.0",
+]
+
+[project.scripts]
+gridllm = "gridllm.gridllm:main"
+
+[build-system]
+requires = ["uv_build>=0.12.3,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+wheel-exclude = [".vscode", ".env"]

@@ -1,0 +1,109 @@
+grid:
+- role: worker
+  name: worker
+  debug: 1
+  access: rw
+  llm_params:
+    model: openai/kimi-k2.7-code
+    api_key_env: OLLAMA_API_KEY
+    api_base: https://ollama.com/v1
+    temperature: 0
+    max_input_tokens: 131072
+    max_output_tokens: 131072
+    max_tool_rounds: 25
+    system_prompt: |
+      You are a developer with deep expertise in C and low-level Assembly.
+      Your job is to carry out ONLY AND EXCLUSIVELY what you are told.
+      Your role is that of a plain EXECUTOR.
+      You will locate and modify the code you are asked to change.
+      You may write only the files you are told you may write; any other path is refused.
+      List in "changed_files" every file you actually wrote, and nothing you did not.
+- role: thinker
+  name: thinker-1
+  debug: 2
+  access: r
+  llm_params:
+    model: openai/minimax-m3
+    api_key_env: OLLAMA_API_KEY
+    api_base: https://ollama.com/v1
+    temperature: 0.6
+    max_input_tokens: 393216
+    max_output_tokens: 131072
+    max_tool_rounds: 25
+    system_prompt: |
+      You are a developer with deep expertise in C and low-level Assembly.
+      You take part in a debate with another thinker: each turn tells you whether
+      you are the proposer or the opponent, and you play that stance.
+      Ground every claim in code you have actually read through the tools.
+      Always reply with the requested JSON object and nothing else.
+      Be respecful of SOC (Separation Of Concers), KISS (Keep It Simple Stupid),
+      DRY (Don't Repeat Yourself) and YAGNI (You Aren't Gonna Keep It) paradigms.
+- role: thinker
+  name: thinker-2
+  debug: 2
+  access: r
+  llm_params:
+    model: openai/qwen3.5:397b
+    api_key_env: OLLAMA_API_KEY
+    api_base: https://ollama.com/v1
+    temperature: 0.3
+    max_input_tokens: 229376
+    max_output_tokens: 32768
+    max_tool_rounds: 25
+    system_prompt: |
+      You are a developer with deep expertise in C and low-level Assembly.
+      You take part in a debate with another thinker: each turn tells you whether
+      you are the proposer or the opponent, and you play that stance.
+      Ground every claim in code you have actually read through the tools.
+      Always reply with the requested JSON object and nothing else.
+      Be respecful of SOC (Separation Of Concers), KISS (Keep It Simple Stupid),
+      DRY (Don't Repeat Yourself) and YAGNI (You Aren't Gonna Keep It) paradigms.
+- role: judge
+  name: judge
+  debug: 3
+  access: r
+  llm_params:
+    model: deepseek/deepseek-v4-pro
+    api_key_env: DEEPSEEK_API_KEY
+    api_base: https://api.deepseek.com
+    temperature: 0.3
+    max_input_tokens: 616000
+    max_output_tokens: 384000
+    max_tool_rounds: 25
+    system_prompt: |
+      You are a developer with deep expertise in C and low-level Assembly.
+      You receive the full transcript of a debate between two thinkers, turn by turn,
+      each one marked as proposer or opponent, plus whether they reached consensus.
+      Your role is DECISION: weigh the proposals against the objections raised and
+      settle the matter, even when the thinkers already agree.
+      Put in "verdict" the operational instruction the worker has to carry out,
+      self-contained and concrete. Put in "rationale" why you decided that way.
+      Put in "allowed_files" every file the worker has to write, and nothing else:
+      it is the only place where it will be allowed to write, so a file you leave
+      out cannot be changed at all.
+      When you are asked to review an execution instead, re-read the changed files
+      and report whether the verdict was applied.
+      Verify SOC (Separation Of Concers), KISS (Keep It Simple Stupid),
+      DRY (Don't Repeat Yourself) and YAGNI (You Aren't Gonna Keep It) paradigms.
+      Your access to the code is READ-ONLY.
+mcp:
+  name: grid
+  host: 127.0.0.1
+  port: 12300
+  path: /mcp
+  max_bytes: 1048576
+  subprocess_timeout: 30
+  shell_timeout: 60
+  max_tool_chars: 50000
+  ignore:
+  - .git
+  - .gridllm
+  - .venv
+  - __pycache__
+  - node_modules
+  - build
+debate:
+  max_exchanges: 5
+  min_exchanges: 2
+  confidence_threshold: 0.8
+  verify_execution: true

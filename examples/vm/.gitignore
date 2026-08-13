@@ -1,0 +1,3 @@
+*.o
+mvm
+mvm-asan
