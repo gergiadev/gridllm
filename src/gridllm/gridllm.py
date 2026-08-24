@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+import atexit
 import shutil
 import socket
 import threading
@@ -98,6 +99,7 @@ def _start_server(config: GridConfig) -> GridMCPServer:
         maxToolChars=config.mcp.max_tool_chars,
     )
     threading.Thread(target=_serve, args=(server, config), daemon=True).start()
+    atexit.register(server.sandbox.remove)
     _wait_for_port(config.mcp.host, config.mcp.port)
     silence_third_party()
     return server

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Iterable, Mapping
+from contextvars import ContextVar
 from pathlib import Path
 from urllib.parse import parse_qs
 
@@ -16,6 +17,8 @@ DEFAULT_ACCESS = "r"
 READ_WRITE = "rw"
 
 WRITE_TOOLS = frozenset({"write_file", "edit_file"})
+
+CURRENT_ACCESS: ContextVar[str] = ContextVar("grid_access", default=DEFAULT_ACCESS)
 
 
 class WriteScope:
@@ -81,7 +84,13 @@ class PermissionFilter:
             return await call_next(ctx)
 
         agent, access = self._resolve(ctx)
+        token = CURRENT_ACCESS.set(access)
+        try:
+            return await self._dispatch(ctx, call_next, agent, access)
+        finally:
+            CURRENT_ACCESS.reset(token)
 
+    async def _dispatch(self, ctx, call_next, agent: str, access: str):
         if ctx.method == "tools/call":
             params = ctx.params or {}
             name = params.get("name")

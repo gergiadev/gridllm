@@ -208,7 +208,7 @@ class RtkReader(Reader):
         )
         if outcome.returncode != 0:
             raise ValueError(outcome.stderr.strip() or f"{RTK} {args[0]}: failed")
-        return outcome.stdout.strip()
+        return outcome.stdout
 
 
 def choose_reader(logger, timeout: int = DEFAULT_SUBPROCESS_TIMEOUT, ignore: Iterable[str] = ()) -> Reader:

@@ -6,6 +6,7 @@ from mcp.server.mcpserver import MCPServer
 from ..logging_setup import get_logger, silence_third_party
 from .permissions import WRITE_TOOLS, PermissionFilter, WriteScope
 from .readers import DEFAULT_SUBPROCESS_TIMEOUT, choose_reader
+from .sandbox import Sandbox
 from .tools import Tools, capped
 
 DEFAULT_MAX_BYTES = 1_048_576
@@ -40,11 +41,14 @@ class GridMCPServer:
         self.mcp = MCPServer(name, log_level=QUIET)
         silence_third_party()
         reader = choose_reader(self.logger, timeout=subprocessTimeout, ignore=self.ignore)
-        self.tools = Tools(self.workspace, reader, maxBytes, shellTimeout, self.ignore, self.logger)
+        self.scope = WriteScope(self.workspace)
+        self.sandbox = Sandbox(self.workspace, self.ignore)
+        self.tools = Tools(
+            self.workspace, reader, maxBytes, shellTimeout, self.ignore, self.logger, self.sandbox, self.scope
+        )
         self.writeTools = self._registerTools()
         if self.writeTools != set(WRITE_TOOLS):
             raise RuntimeError(f"registered write tools {sorted(self.writeTools)} differ from {sorted(WRITE_TOOLS)}")
-        self.scope = WriteScope(self.workspace)
         self.mcp.middleware.append(PermissionFilter(accessFromAgent, self.writeTools, self.logger, self.scope))
 
     def _registerTools(self) -> set[str]:

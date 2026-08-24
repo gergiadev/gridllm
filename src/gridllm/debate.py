@@ -31,6 +31,8 @@ PROPOSER_BRIEF = (
     "Every open objection listed below must be answered: add an entry to \"resolves\" with its exact id and how "
     "your proposal deals with it, either by fixing it or by showing why it does not hold. Use the ids as they are "
     "written, never invent one.\n"
+    "An objection you filed yourself in an earlier exchange does not close because you answer it: it stays open "
+    "until an opponent accepts your proposal.\n"
     "The \"how\" field must be a substantive explanation — at least two sentences — that references specific "
     "code or evidence. Resolutions that merely state inability (\"cannot resolve\", \"unable to verify\", etc.) "
     "are rejected and the objection stays open.\n"
@@ -47,7 +49,8 @@ OPPONENT_BRIEF = (
     "Put every substantive objection in \"objections\", each with its \"claim\" and the \"evidence\" you read to "
     "back it, quoting file and lines.\n"
     "Set \"accepts\" to true, with \"objections\" empty, ONLY when you have no objection left and you accept the "
-    "proposal as it stands. It does not mean you are confident in your criticism.\n"
+    "proposal as it stands. It does not mean you are confident in your criticism. Accepting also confirms the "
+    "answers the proposer gave to objections it had filed itself, which close only then.\n"
     "Use status \"needs_peer\" while even one objection remains, \"concluded\" otherwise.\n"
     "The confidence field ranges from 0.0 to 1.0 and measures how sure you are of that judgement."
 )
@@ -120,9 +123,19 @@ class ObjectionLedger:
                 continue
             if entry.agent == agent:
                 self_resolved.append(resolution.objection_id)
+                entry.claimed_by = agent
+                continue
             entry.resolved_by = agent
 
         return unknown, rejected, self_resolved
+
+    def confirm(self, agent: str) -> list[str]:
+        confirmed = [
+            entry for entry in self.entries if entry.resolved_by is None and entry.claimed_by == agent
+        ]
+        for entry in confirmed:
+            entry.resolved_by = entry.claimed_by
+        return [entry.id for entry in confirmed]
 
     def pending(self) -> list[TrackedObjection]:
         return [entry for entry in self.entries if entry.resolved_by is None]
@@ -141,7 +154,10 @@ def _clip(text: str) -> str:
 def render_objections(entries: list[TrackedObjection]) -> str:
     if not entries:
         return NO_OBJECTIONS
-    return "\n".join(f"- [{entry.id}] {_clip(entry.claim)} (evidence: {_clip(entry.evidence)})" for entry in entries)
+    return "\n".join(
+        f"- [{entry.id}] ({_state(entry)}) {_clip(entry.claim)} (evidence: {_clip(entry.evidence)})"
+        for entry in entries
+    )
 
 
 def _render_findings(findings: list[Finding]) -> list[str]:
@@ -149,6 +165,14 @@ def _render_findings(findings: list[Finding]) -> list[str]:
         f"    finding {finding.file}:{','.join(str(line) for line in finding.lines) or '?'} {_clip(finding.summary)}"
         for finding in findings
     ]
+
+
+def _state(entry: TrackedObjection) -> str:
+    if entry.resolved_by is not None:
+        return f"resolved by {entry.resolved_by}"
+    if entry.claimed_by is not None:
+        return f"answered by {entry.claimed_by}, still open until an opponent accepts"
+    return "OPEN"
 
 
 def _render_turn(turn: Turn, ledger: ObjectionLedger) -> list[str]:
@@ -173,8 +197,7 @@ def _render_turn(turn: Turn, ledger: ObjectionLedger) -> list[str]:
         ]
         tracked = ledger.by_turn(turn.exchange, turn.agent)
         for entry in tracked:
-            state = "OPEN" if entry.resolved_by is None else f"resolved by {entry.resolved_by}"
-            lines.append(f"    objection [{entry.id}] ({state}): {_clip(entry.claim)}")
+            lines.append(f"    objection [{entry.id}] ({_state(entry)}): {_clip(entry.claim)}")
         return lines + _render_findings(turn.rebuttal.findings)
 
     return [head]

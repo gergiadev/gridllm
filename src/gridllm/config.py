@@ -83,6 +83,20 @@ class GridConfig(BaseModel):
     summarizer: str | None = None
 
     @model_validator(mode="after")
+    def _roles_are_complete(self) -> "GridConfig":
+        for role in ("worker", "judge"):
+            found = len(self.by_role(role))
+            if found != 1:
+                raise ValueError(f"the grid needs exactly one {role}, found {found}")
+        thinkers = len(self.by_role("thinker"))
+        if thinkers < 2:
+            raise ValueError(
+                f"the grid needs at least two thinkers, found {thinkers}: with nobody to oppose it "
+                "a proposal can never close the debate, so every run would burn max_exchanges"
+            )
+        return self
+
+    @model_validator(mode="after")
     def _summarizer_exists(self) -> "GridConfig":
         names = {agent.name for agent in self.grid}
         if self.summarizer is not None and self.summarizer not in names:

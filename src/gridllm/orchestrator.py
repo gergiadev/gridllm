@@ -103,8 +103,8 @@ class Grid:
             if self_resolved:
                 self._report(
                     proposer.name,
-                    f"resolved own objections filed as opponent "
-                    f"(will be confirmed by other thinkers): {', '.join(self_resolved)}",
+                    f"answered own objections filed as opponent — they stay open "
+                    f"until an opponent accepts the proposal: {', '.join(self_resolved)}",
                 )
 
             snapshot = list(history)
@@ -116,6 +116,17 @@ class Grid:
             for turn in rebuttals:
                 if turn.rebuttal is not None:
                     ledger.open(exchange, turn.agent, turn.rebuttal.objections)
+
+            answered = [turn for turn in rebuttals if turn.rebuttal is not None]
+            if answered and all(t.rebuttal.accepts and not t.rebuttal.objections for t in answered):
+                confirmed = ledger.confirm(proposer.name)
+                if confirmed:
+                    EventBus.emit_to(
+                        self.bus,
+                        KIND_LOG,
+                        {"msg": f"opponents accepted, closing {', '.join(confirmed)}"},
+                        proposer.name,
+                    )
 
             self._persist(task, history, ledger)
 

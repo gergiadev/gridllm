@@ -9,8 +9,10 @@ from mcp.types import INVALID_PARAMS, METHOD_NOT_FOUND
 from .errors import mapError
 from .formatting import formatEntries, formatEntry
 from .languages import SourceParser, choose_parser, supported_extensions
+from .permissions import CURRENT_ACCESS, READ_WRITE
 from .readers import Reader
 from .rtkshell import RTK, RTK_COMMANDS, rewriteCommand, rtkAvailable
+from .sandbox import Sandbox, modified, snapshot, tracked
 from .workspace import isIgnored, relPath, resolveSafe, statEntry, writeAtomic
 
 
@@ -39,6 +41,8 @@ class Tools:
         shellTimeout: int = 60,
         ignore: Iterable[str] = (),
         logger=None,
+        sandbox: Sandbox | None = None,
+        scope=None,
     ):
         self.workspace = workspace
         self.reader = reader
@@ -46,6 +50,9 @@ class Tools:
         self.shellTimeout = shellTimeout
         self.ignore = tuple(ignore)
         self.logger = logger
+        self.sandbox = sandbox
+        self.scope = scope
+        self.tracked = tracked(workspace)
         self.rtk = rtkAvailable()
         if logger:
             if self.rtk:
@@ -64,9 +71,10 @@ class Tools:
             return [target]
         return [
             path
-            for ext in extensions
-            for path in sorted(target.rglob(f"*{ext}"))
-            if path.is_file() and not isIgnored(path, self.workspace, self.ignore)
+            for path in sorted(target.rglob("*"))
+            if path.suffix.lower() in extensions
+            and path.is_file()
+            and not isIgnored(path, self.workspace, self.ignore)
         ]
 
     async def _offload(self, fn: Callable, *args):
@@ -135,6 +143,7 @@ class Tools:
         if len(content.encode("utf-8")) > self.maxBytes:
             raise MCPError(INVALID_PARAMS, f"content too large: max {self.maxBytes} bytes")
         written = await self._offload(writeAtomic, target, content)
+        await self._invalidateSandbox()
         return f"wrote {written} characters to {path}"
 
     async def edit_file(self, path: str, oldString: str, newString: str) -> str:
@@ -163,6 +172,7 @@ class Tools:
         if len(updated.encode("utf-8")) > self.maxBytes:
             raise MCPError(INVALID_PARAMS, f"result too large: max {self.maxBytes} bytes")
         await self._offload(writeAtomic, target, updated)
+        await self._invalidateSandbox()
         return f"edited {path}"
 
     async def search_content(self, query: str, subdir: str = ".", isRegex: bool = False, include: str = "") -> str:
@@ -215,7 +225,14 @@ class Tools:
         """Run a shell command and return its output.
 
         Use this to compile code, run tests, inspect binaries, or check tool
-        availability. The command runs in a subprocess with a 60-second timeout.
+        availability. The command runs in a subprocess with a timeout.
+
+        If your access is read-only the command runs against a private throwaway
+        copy of the workspace, not the workspace itself. Build it, edit it, break
+        it: nothing you do there reaches the real files, and the copy keeps its
+        state between your commands so a build followed by a test works. Because
+        of that, never report a file as changed on the strength of a shell
+        command alone.
 
         command: the shell command to execute.
         workdir: subdirectory of the workspace to run in; defaults to the workspace root.
@@ -230,9 +247,14 @@ class Tools:
         target = resolveSafe(self.workspace, workdir)
         if target.is_file():
             target = target.parent
+        root, confined = await self._shellRoot()
+        target = root / target.relative_to(self.workspace)
+        if not target.is_dir():
+            target = root
         effective = rewriteCommand(command) if self.rtk else command
         if self.logger and effective != command:
             self.logger.info("shell via %s: %s", RTK, effective)
+        before = {} if confined else self._auditBefore()
         try:
             proc = await asyncio.create_subprocess_shell(
                 effective,
@@ -249,9 +271,42 @@ class Tools:
                     f"command timed out after {self.shellTimeout}s: {command[:80]}",
                 )
             output = stdout.decode("utf-8", errors="replace").strip()
-            return (output or "(no output)") + f"\n\nEXIT: {proc.returncode}"
+            report = (output or "(no output)") + f"\n\nEXIT: {proc.returncode}"
+            return report + self._auditAfter(before)
         except OSError as exc:
             raise MCPError(INVALID_PARAMS, f"failed to run command: {exc}")
+
+    async def _invalidateSandbox(self) -> None:
+        if self.sandbox is not None:
+            await self.sandbox.invalidate()
+
+    async def _shellRoot(self) -> tuple[Path, bool]:
+        if self.sandbox is None or CURRENT_ACCESS.get() == READ_WRITE:
+            return self.workspace, False
+        root = await self.sandbox.path()
+        if self.logger:
+            self.logger.info("shell confined to the throwaway copy at %s", root)
+        return root, True
+
+    def _auditBefore(self) -> dict:
+        if self.scope is None or self.scope.allowed is None:
+            return {}
+        return snapshot(self.workspace, self.ignore, self.tracked)
+
+    def _auditAfter(self, before: dict) -> str:
+        if not before:
+            return ""
+        touched = [path for path in modified(before, snapshot(self.workspace, self.ignore, self.tracked))
+                   if not self.scope.permits(path)]
+        if not touched:
+            return ""
+        shown = ", ".join(relPath(Path(path), self.workspace) for path in touched)
+        if self.logger:
+            self.logger.warning("shell modified files outside the verdict scope: %s", shown)
+        return (
+            f"\n\nWARNING: this command modified files the verdict does not allow you to write: {shown}. "
+            "Undo those changes; only the files the verdict lists may differ from what was there before."
+        )
 
     async def git_diff(self, staged: bool = False) -> str:
         """Show unstaged diffs in the workspace.
@@ -372,8 +427,12 @@ class Tools:
             if len(source.encode("utf-8")) > self.maxBytes:
                 skipped.append(f"{relPath(file, self.workspace)} (too large: {len(source.encode('utf-8'))} > {self.maxBytes})")
                 continue
+            parser = choose_parser(file.suffix.lower())
+            if parser is None:
+                skipped.append(f"{relPath(file, self.workspace)} (no parser for {file.suffix or 'this name'})")
+                continue
             try:
-                found = await asyncio.to_thread(extract, choose_parser(file.suffix.lower()), source)
+                found = await asyncio.to_thread(extract, parser, source)
             except SyntaxError:
                 skipped.append(f"{relPath(file, self.workspace)} (syntax error)")
                 continue

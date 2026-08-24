@@ -256,7 +256,7 @@ class LLMClient:
         if self.tool_results == "mirror":
             messages.append(_mirror_message(messages[-len(message.tool_calls):]))
 
-        reply = await self._complete(messages, [PROBE_TOOL])
+        reply = await self._complete(messages, None)
         seen = nonce in (reply.content or "")
         self.trace.prompt(f"tool channel probe: {self.name} {'sees' if seen else 'does not see'} tool results")
         return seen

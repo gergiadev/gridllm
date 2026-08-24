@@ -51,6 +51,7 @@ class TrackedObjection(BaseModel):
     agent: str
     claim: str
     evidence: str = ""
+    claimed_by: str | None = None
     resolved_by: str | None = None
 
 
