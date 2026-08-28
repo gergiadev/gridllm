@@ -6,7 +6,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Iterable
 from pathlib import Path
 
-from .workspace import isIgnored
+from .workspace import isIgnored, matchesInclude
 
 RTK = "rtk"
 RG = "rg"
@@ -47,7 +47,9 @@ class Reader(ABC):
         ...
 
     @abstractmethod
-    def search(self, query: str, base: Path, root: Path, isRegex: bool) -> list[dict]:
+    def search(
+        self, query: str, base: Path, root: Path, isRegex: bool, include: tuple[str, ...] = ()
+    ) -> list[dict]:
         ...
 
 
@@ -74,11 +76,15 @@ class NativeReader(Reader):
             entries.append(_buildEntry(item, root, stat))
         return entries
 
-    def search(self, query: str, base: Path, root: Path, isRegex: bool) -> list[dict]:
+    def search(
+        self, query: str, base: Path, root: Path, isRegex: bool, include: tuple[str, ...] = ()
+    ) -> list[dict]:
         pattern = re.compile(query) if isRegex else re.compile(re.escape(query))
         results: list[dict] = []
         for file in sorted(base.rglob("*")):
             if not file.is_file() or not self.keep(file, root):
+                continue
+            if include and not matchesInclude(file.relative_to(root).as_posix(), include):
                 continue
             try:
                 text = file.read_text(encoding="utf-8")
@@ -102,23 +108,32 @@ class _GrepReader(Reader):
         self.native = NativeReader(ignore)
 
     def read(self, path: Path, maxBytes: int) -> str:
-        _ensureWithin(path, maxBytes)
-        return path.read_text(encoding="utf-8")
+        return self.native.read(path, maxBytes)
 
     def listing(self, base: Path, root: Path) -> list[dict]:
         return self.native.listing(base, root)
 
-    def _parse(self, stdout: str, root: Path) -> list[dict]:
-        return [entry for entry in _parseGrepOutput(stdout, root) if self.keep(root / entry["path"], root)]
+    def _parse(self, stdout: str, root: Path, include: tuple[str, ...]) -> list[dict]:
+        kept = [
+            entry
+            for entry in _parseGrepOutput(stdout, root)
+            if self.keep(root / entry["path"], root)
+            and (not include or matchesInclude(entry["path"], include))
+        ]
+        return sorted(kept, key=lambda entry: (entry["path"], entry["line"]))
 
 
 class RipgrepReader(_GrepReader):
 
-    def search(self, query: str, base: Path, root: Path, isRegex: bool) -> list[dict]:
-        args = [RG, "--no-heading", "-n", "--color", "never"]
+    def search(
+        self, query: str, base: Path, root: Path, isRegex: bool, include: tuple[str, ...] = ()
+    ) -> list[dict]:
+        args = [RG, "--no-heading", "-n", "--color", "never", "--null"]
         if not isRegex:
             args.append("-F")
-        args.extend([query, str(base)])
+        for pattern in include:
+            args.extend(["-g", pattern])
+        args.extend(["--", query, str(base)])
         try:
             outcome = subprocess.run(
                 args,
@@ -128,20 +143,24 @@ class RipgrepReader(_GrepReader):
                 check=False,
             )
         except (OSError, subprocess.TimeoutExpired):
-            return self.native.search(query, base, root, isRegex)
+            return self.native.search(query, base, root, isRegex, include)
         if outcome.returncode not in (0, 1):
-            return self.native.search(query, base, root, isRegex)
-        return self._parse(outcome.stdout, root)
+            return self.native.search(query, base, root, isRegex, include)
+        return self._parse(outcome.stdout, root, include)
 
 
 class GrepReader(_GrepReader):
 
-    def search(self, query: str, base: Path, root: Path, isRegex: bool) -> list[dict]:
+    def search(
+        self, query: str, base: Path, root: Path, isRegex: bool, include: tuple[str, ...] = ()
+    ) -> list[dict]:
         binary = EGREP if isRegex else GREP
-        args = [binary, "-rn", "--color=never"]
+        args = [binary, "-rnZ", "--color=never"]
         if not isRegex:
             args.append("-F")
-        args.extend([query, str(base)])
+        for pattern in include:
+            args.append(f"--include={pattern}")
+        args.extend(["--", query, str(base)])
         try:
             outcome = subprocess.run(
                 args,
@@ -151,28 +170,34 @@ class GrepReader(_GrepReader):
                 check=False,
             )
         except (OSError, subprocess.TimeoutExpired):
-            return self.native.search(query, base, root, isRegex)
+            return self.native.search(query, base, root, isRegex, include)
         if outcome.returncode not in (0, 1):
-            return self.native.search(query, base, root, isRegex)
-        return self._parse(outcome.stdout, root)
+            return self.native.search(query, base, root, isRegex, include)
+        return self._parse(outcome.stdout, root, include)
+
+
+def _splitRecord(line: str) -> tuple[str, str] | None:
+    head, sep, rest = line.partition("\0")
+    if sep:
+        return head, rest
+    head, sep, rest = line.partition(":")
+    return (head, rest) if sep else None
 
 
 def _parseGrepOutput(stdout: str, root: Path) -> list[dict]:
     results: list[dict] = []
     for line in stdout.splitlines():
-        sep = line.find(":")
-        if sep < 0:
+        record = _splitRecord(line)
+        if record is None:
             continue
-        path_part = line[:sep]
-        rest = line[sep + 1:]
-        sep2 = rest.find(":")
-        if sep2 < 0:
+        path_part, rest = record
+        number, sep, text = rest.partition(":")
+        if not sep:
             continue
         try:
-            line_num = int(rest[:sep2])
+            line_num = int(number)
         except ValueError:
             continue
-        text = rest[sep2 + 1:]
         try:
             rel = Path(path_part).relative_to(root).as_posix()
         except ValueError:
@@ -195,8 +220,10 @@ class RtkReader(Reader):
     def listing(self, base: Path, root: Path) -> list[dict]:
         return self.native.listing(base, root)
 
-    def search(self, query: str, base: Path, root: Path, isRegex: bool) -> list[dict]:
-        return self.native.search(query, base, root, isRegex)
+    def search(
+        self, query: str, base: Path, root: Path, isRegex: bool, include: tuple[str, ...] = ()
+    ) -> list[dict]:
+        return self.native.search(query, base, root, isRegex, include)
 
     def _run(self, args: list[str]) -> str:
         outcome = subprocess.run(
@@ -225,10 +252,10 @@ def choose_reader(logger, timeout: int = DEFAULT_SUBPROCESS_TIMEOUT, ignore: Ite
 
     if rg_path:
         logger.info("%s found at %s: preferred for search", RG, rg_path)
-        reader.search = RipgrepReader(ignore, timeout=timeout).search  # type: ignore[method-assign]
+        reader.search = RipgrepReader(ignore, timeout=timeout).search
     elif grep_path:
         logger.info("%s found at %s: fallback for search", GREP, grep_path)
-        reader.search = GrepReader(ignore, timeout=timeout).search  # type: ignore[method-assign]
+        reader.search = GrepReader(ignore, timeout=timeout).search
     else:
         logger.info("neither %s nor %s available: using native search", RG, GREP)
 

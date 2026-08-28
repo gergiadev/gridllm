@@ -1,6 +1,6 @@
 import asyncio
+import re
 import shutil
-import subprocess
 import tempfile
 from collections.abc import Iterable, Mapping
 from pathlib import Path
@@ -9,9 +9,15 @@ from .workspace import isIgnored
 
 PREFIX = "gridllm-sandbox-"
 
+SLUG = re.compile(r"[^A-Za-z0-9_.-]+")
+
 ARTIFACT_SUFFIXES = frozenset({
     ".o", ".a", ".so", ".d", ".obj", ".exe", ".gch", ".pch", ".lo", ".la", ".pyc", ".pyo", ".elf", ".bin", ".map",
 })
+
+
+def _slug(owner: str) -> str:
+    return SLUG.sub("_", owner)[:32] or "anon"
 
 
 class Sandbox:
@@ -19,17 +25,19 @@ class Sandbox:
     def __init__(self, workspace: Path, ignore: Iterable[str] = ()) -> None:
         self.workspace = workspace
         self.ignore = tuple(ignore)
-        self.root: Path | None = None
+        self.roots: dict[str, Path] = {}
         self._lock = asyncio.Lock()
 
-    async def path(self) -> Path:
+    async def path(self, owner: str) -> Path:
         async with self._lock:
-            if self.root is None:
-                self.root = await asyncio.to_thread(self._build)
-            return self.root
+            root = self.roots.get(owner)
+            if root is None:
+                root = await asyncio.to_thread(self._build, owner)
+                self.roots[owner] = root
+            return root
 
-    def _build(self) -> Path:
-        root = Path(tempfile.mkdtemp(prefix=PREFIX))
+    def _build(self, owner: str) -> Path:
+        root = Path(tempfile.mkdtemp(prefix=f"{PREFIX}{_slug(owner)}-"))
         shutil.copytree(
             self.workspace,
             root,
@@ -41,38 +49,22 @@ class Sandbox:
 
     async def invalidate(self) -> None:
         async with self._lock:
-            stale, self.root = self.root, None
-        if stale is not None:
-            await asyncio.to_thread(shutil.rmtree, stale, True)
+            stale, self.roots = list(self.roots.values()), {}
+        for root in stale:
+            await asyncio.to_thread(shutil.rmtree, root, True)
 
     def remove(self) -> None:
-        stale, self.root = self.root, None
-        if stale is not None:
-            shutil.rmtree(stale, ignore_errors=True)
+        stale, self.roots = list(self.roots.values()), {}
+        for root in stale:
+            shutil.rmtree(root, ignore_errors=True)
 
 
-def tracked(root: Path) -> set[str] | None:
-    try:
-        outcome = subprocess.run(
-            ["git", "ls-files", "-z"],
-            cwd=str(root), capture_output=True, text=True, timeout=30, check=False,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    if outcome.returncode != 0:
-        return None
-    names = [name for name in outcome.stdout.split("\0") if name]
-    return {(root / name).as_posix() for name in names} or None
-
-
-def snapshot(root: Path, ignore: Iterable[str], keep: set[str] | None = None) -> dict[str, tuple[int, int]]:
+def snapshot(root: Path, ignore: Iterable[str]) -> dict[str, tuple[int, int]]:
     seen: dict[str, tuple[int, int]] = {}
     for item in root.rglob("*"):
         if isIgnored(item, root, ignore):
             continue
-        if keep is not None and item.as_posix() not in keep:
-            continue
-        if keep is None and item.suffix.lower() in ARTIFACT_SUFFIXES:
+        if item.suffix.lower() in ARTIFACT_SUFFIXES:
             continue
         try:
             stat = item.stat()
@@ -85,4 +77,6 @@ def snapshot(root: Path, ignore: Iterable[str], keep: set[str] | None = None) ->
 
 
 def modified(before: Mapping[str, tuple[int, int]], after: Mapping[str, tuple[int, int]]) -> list[str]:
-    return sorted(path for path, meta in after.items() if path in before and before[path] != meta)
+    changed = set(before) ^ set(after)
+    changed.update(path for path in set(before) & set(after) if before[path] != after[path])
+    return sorted(changed)

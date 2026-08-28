@@ -5,6 +5,8 @@ from .parser_factory import register_parser
 
 _DEFINITIONS = (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
 
+_ASSIGNMENTS = (ast.Assign, ast.AnnAssign)
+
 
 def _signature(node: ast.AST, sourceLines: list[str]) -> str:
     line = getattr(node, "lineno", 0)
@@ -14,7 +16,7 @@ def _signature(node: ast.AST, sourceLines: list[str]) -> str:
 
 
 def _docstring(node: ast.AST) -> str | None:
-    if isinstance(node, ast.Assign):
+    if isinstance(node, _ASSIGNMENTS):
         return None
     return ast.get_docstring(node)
 
@@ -26,19 +28,25 @@ def _kindOf(node: ast.AST, inClass: bool) -> str:
         return "async method" if inClass else "async function"
     if isinstance(node, ast.FunctionDef):
         return "method" if inClass else "function"
-    if isinstance(node, ast.Assign):
-        return "variable"
+    if isinstance(node, _ASSIGNMENTS):
+        return "attribute" if inClass else "variable"
     return "other"
+
+
+def _assignedNames(node: ast.AST) -> list[str]:
+    if isinstance(node, ast.AnnAssign):
+        return [node.target.id] if isinstance(node.target, ast.Name) else []
+    return [target.id for target in node.targets if isinstance(target, ast.Name)]
 
 
 def _toEntry(node: ast.AST, sourceLines: list[str], inClass: bool) -> dict | None:
     if isinstance(node, _DEFINITIONS):
         name = node.name
-    elif isinstance(node, ast.Assign):
-        targets = [t for t in node.targets if isinstance(t, ast.Name)]
-        if not targets:
+    elif isinstance(node, _ASSIGNMENTS):
+        names = _assignedNames(node)
+        if not names:
             return None
-        name = ", ".join(t.id for t in targets)
+        name = ", ".join(names)
     else:
         return None
     return {
@@ -51,14 +59,28 @@ def _toEntry(node: ast.AST, sourceLines: list[str], inClass: bool) -> dict | Non
     }
 
 
-def _walk(node: ast.AST, sourceLines: list[str], inClass: bool, acc: list[dict]) -> None:
-    if isinstance(node, (*_DEFINITIONS, ast.Assign)):
-        entry = _toEntry(node, sourceLines, inClass)
-        if entry is not None:
-            acc.append(entry)
-    newInClass = inClass or isinstance(node, ast.ClassDef)
+def _walk(
+    node: ast.AST,
+    sourceLines: list[str],
+    inClass: bool,
+    inFunction: bool,
+    acc: list[dict],
+) -> None:
     for child in ast.iter_child_nodes(node):
-        _walk(child, sourceLines, newInClass, acc)
+        if isinstance(child, _DEFINITIONS):
+            entry = _toEntry(child, sourceLines, inClass)
+            if entry is not None:
+                acc.append(entry)
+            isClass = isinstance(child, ast.ClassDef)
+            _walk(child, sourceLines, isClass, inFunction or not isClass, acc)
+            continue
+        if isinstance(child, _ASSIGNMENTS):
+            if not inFunction:
+                entry = _toEntry(child, sourceLines, inClass)
+                if entry is not None:
+                    acc.append(entry)
+            continue
+        _walk(child, sourceLines, inClass, inFunction, acc)
 
 
 def _bodyEntry(node: ast.AST, sourceLines: list[str]) -> dict:
@@ -86,7 +108,7 @@ class PythonParser(SourceParser):
         tree = ast.parse(sourceText)
         sourceLines = sourceText.splitlines()
         acc: list[dict] = []
-        _walk(tree, sourceLines, False, acc)
+        _walk(tree, sourceLines, False, False, acc)
         return acc
 
     def getSymbolBody(self, sourceText: str, symbolName: str) -> list[dict]:

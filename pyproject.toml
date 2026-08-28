@@ -23,6 +23,13 @@ gui = [
     "textual>=0.80.0",
 ]
 
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.16",
+]
+
 [project.scripts]
 gridllm = "gridllm.gridllm:main"
 
@@ -32,3 +39,7 @@ build-backend = "uv_build"
 
 [tool.uv.build-backend]
 wheel-exclude = [".vscode", ".env"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

@@ -2,6 +2,8 @@ import asyncio
 import json
 from pathlib import Path
 
+from mcp import MCPError
+
 from . import debate, paths
 from .config import DebateConfig
 from .events import (
@@ -18,6 +20,7 @@ from .events import (
     KIND_VERDICT,
     EventBus,
 )
+from .GridMCPServer.workspace import relPath, resolveSafe
 from .LLMClient import AgentError, LLMClient
 from .messages import (
     Escalation,
@@ -36,8 +39,12 @@ REVIEW_BRIEF = (
 )
 
 
-def _norm(path: str) -> str:
-    return Path(path).as_posix().removeprefix("./")
+def _norm(path: str, workspace: Path) -> str:
+    try:
+        resolved = resolveSafe(workspace, path)
+    except MCPError:
+        return Path(path).as_posix().removeprefix("./")
+    return relPath(resolved, workspace)
 
 
 class Grid:
@@ -74,7 +81,7 @@ class Grid:
         verdict = await self._adjudicate(task, history, ledger, agreed)
         result = await self._execute(task, verdict)
         EventBus.emit_to(self.bus, KIND_EXECUTION_DONE, {"result": result[:2000]})
-        EventBus.emit_to(self.bus, KIND_RUN_DONE, {"result": result[:2000]})
+        EventBus.emit_to(self.bus, KIND_RUN_DONE, {"transcript": str(self.transcript_path)})
         return result
 
     async def _debate(self, task: str) -> tuple[list[Turn], debate.ObjectionLedger, bool]:
@@ -286,8 +293,9 @@ class Grid:
             if self.scope is not None:
                 self.scope.clear()
 
-        touched = {_norm(path) for path in self.worker.toolbox.touched}
-        declared = {_norm(path) for path in report.changed_files}
+        workspace = paths.workspace()
+        touched = {_norm(path, workspace) for path in self.worker.toolbox.touched}
+        declared = {_norm(path, workspace) for path in report.changed_files}
         if declared != touched:
             self._report(
                 self.worker.name,
@@ -324,4 +332,6 @@ class Grid:
             {"approved": review.approved, "note": review.note},
             self.judge.name,
         )
+        if not review.approved:
+            self._report(self.judge.name, f"review rejected the execution: {review.note}")
         return review

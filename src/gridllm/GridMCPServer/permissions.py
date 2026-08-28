@@ -18,7 +18,11 @@ READ_WRITE = "rw"
 
 WRITE_TOOLS = frozenset({"write_file", "edit_file"})
 
+DEFAULT_AGENT = "<unknown>"
+
 CURRENT_ACCESS: ContextVar[str] = ContextVar("grid_access", default=DEFAULT_ACCESS)
+
+CURRENT_AGENT: ContextVar[str] = ContextVar("grid_agent", default=DEFAULT_AGENT)
 
 
 class WriteScope:
@@ -64,7 +68,7 @@ class PermissionFilter:
         request = getattr(ctx, "request", None)
         if request is None:
             self.logger.warning("request without HTTP context: applying '%s'", DEFAULT_ACCESS)
-            return "<unknown>", DEFAULT_ACCESS
+            return DEFAULT_AGENT, DEFAULT_ACCESS
 
         agents = parse_qs(request.url.query).get("agent", [])
         if not agents:
@@ -84,11 +88,13 @@ class PermissionFilter:
             return await call_next(ctx)
 
         agent, access = self._resolve(ctx)
-        token = CURRENT_ACCESS.set(access)
+        accessToken = CURRENT_ACCESS.set(access)
+        agentToken = CURRENT_AGENT.set(agent)
         try:
             return await self._dispatch(ctx, call_next, agent, access)
         finally:
-            CURRENT_ACCESS.reset(token)
+            CURRENT_AGENT.reset(agentToken)
+            CURRENT_ACCESS.reset(accessToken)
 
     async def _dispatch(self, ctx, call_next, agent: str, access: str):
         if ctx.method == "tools/call":

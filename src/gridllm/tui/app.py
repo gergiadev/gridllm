@@ -12,7 +12,7 @@ class GridApp(App):
     TITLE = "GridLLM"
     SUB_TITLE = f"v{VERSION} (Beta)"
 
-    BINDINGS = [  # noqa: RUF012 - Textual idiom
+    BINDINGS = [  # noqa: RUF012
         Binding("ctrl+c,ctrl+q,q", "quit", "Quit", show=True),
     ]
 

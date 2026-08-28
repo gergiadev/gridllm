@@ -129,7 +129,7 @@ class LLMClient:
             if not message.tool_calls:
                 return await self._finalize(message.content, schema)
 
-            messages.append(message.model_dump())
+            messages.append(message.model_dump(exclude_none=True))
             results = [await self._tool_result(call) for call in message.tool_calls]
             messages.extend(results)
             if self.tool_results == "mirror":
@@ -250,7 +250,7 @@ class LLMClient:
             self.trace.prompt(f"tool channel probe: {self.name} did not call {PROBE_TOOL_NAME}")
             return False
 
-        messages.append(message.model_dump())
+        messages.append(message.model_dump(exclude_none=True))
         for call in message.tool_calls:
             messages.append(_tool_message(call, PROBE_TOOL_NAME, nonce))
         if self.tool_results == "mirror":

@@ -1,19 +1,36 @@
 import asyncio
 import functools
+import os
+import signal
 from collections.abc import Callable, Iterable
 from pathlib import Path
 
 from mcp import MCPError
-from mcp.types import INVALID_PARAMS, METHOD_NOT_FOUND
+from mcp.types import INVALID_PARAMS
 
 from .errors import mapError
 from .formatting import formatEntries, formatEntry
 from .languages import SourceParser, choose_parser, supported_extensions
-from .permissions import CURRENT_ACCESS, READ_WRITE
+from .permissions import CURRENT_ACCESS, CURRENT_AGENT, READ_WRITE
 from .readers import Reader
 from .rtkshell import RTK, RTK_COMMANDS, rewriteCommand, rtkAvailable
-from .sandbox import Sandbox, modified, snapshot, tracked
-from .workspace import isIgnored, relPath, resolveSafe, statEntry, writeAtomic
+from .sandbox import Sandbox, modified, snapshot
+from .workspace import (
+    expandBraces,
+    isIgnored,
+    relPath,
+    resolveSafe,
+    statEntry,
+    writeAtomic,
+)
+
+
+async def _terminateGroup(proc) -> None:
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        proc.kill()
+    await proc.wait()
 
 
 def capped(fn: Callable, limit: int) -> Callable:
@@ -52,7 +69,6 @@ class Tools:
         self.logger = logger
         self.sandbox = sandbox
         self.scope = scope
-        self.tracked = tracked(workspace)
         self.rtk = rtkAvailable()
         if logger:
             if self.rtk:
@@ -96,7 +112,7 @@ class Tools:
         """
         target = resolveSafe(self.workspace, subdir)
         if not target.exists():
-            raise MCPError(METHOD_NOT_FOUND, f"no such directory: {subdir}")
+            raise MCPError(INVALID_PARAMS, f"no such directory: {subdir}")
         entries = await self._offload(self.reader.listing, target, self.workspace)
         return formatEntries(entries, "(no files)")
 
@@ -123,7 +139,8 @@ class Tools:
             end = start + limit if limit > 0 else len(all_lines)
             selected = all_lines[start:end]
             if not selected:
-                return f"(lines {offset}-{offset + limit} out of range; file has {len(all_lines)} lines)"
+                last = start + limit if limit > 0 else len(all_lines)
+                return f"(lines {start + 1}-{last} out of range; file has {len(all_lines)} lines)"
             return "\n".join(selected)
         return content
 
@@ -159,10 +176,7 @@ class Tools:
         newString: text to put in its place; empty to delete.
         """
         target = resolveSafe(self.workspace, path)
-        try:
-            current = await asyncio.to_thread(target.read_text, "utf-8")
-        except FileNotFoundError:
-            raise MCPError(METHOD_NOT_FOUND, f"file not found: {path}")
+        current = await self._offload(target.read_text, "utf-8")
         count = current.count(oldString)
         if count == 0:
             raise MCPError(INVALID_PARAMS, "oldString not found in the file")
@@ -184,8 +198,11 @@ class Tools:
         query: literal text to find, or a Python regular expression if isRegex.
         subdir: directory relative to the workspace root; defaults to the whole workspace.
         isRegex: treat query as a regular expression instead of literal text.
-        include: optional glob pattern to filter files (e.g. "*.{c,h,s}" or "*.py").
-            Only files whose name matches the pattern are searched.
+        include: optional glob pattern restricting which files are searched, matched
+            against both the path relative to the workspace root and the bare file
+            name. Brace alternatives are expanded, so "*.{c,h,s}" searches C sources
+            and headers and assembly, "*.py" only Python, "src/**/*.c" only C files
+            under src. Empty means every file.
 
         Returns one JSON object per line with "path" (relative to the workspace
         root, usable directly with read_file), the 1-based "line" number and the
@@ -194,11 +211,10 @@ class Tools:
         if not query:
             raise MCPError(INVALID_PARAMS, "empty query")
         target = resolveSafe(self.workspace, subdir)
-        results = await self._offload(self.reader.search, query, target, self.workspace, isRegex)
-        if include:
-            # python convention for glob patterns: e.g. "*.{c,h}" → fnmatch
-            import fnmatch
-            results = [r for r in results if fnmatch.fnmatch(r["path"], include)]
+        patterns = tuple(expandBraces(include)) if include else ()
+        results = await self._offload(
+            self.reader.search, query, target, self.workspace, isRegex, patterns
+        )
         return formatEntries(results, "(no matches)")
 
     async def stat(self, path: str) -> str:
@@ -213,12 +229,7 @@ class Tools:
         passed), "size" in bytes, "mtime" as a unix timestamp and "isDir".
         """
         target = resolveSafe(self.workspace, path)
-        try:
-            entry = await asyncio.to_thread(statEntry, target)
-        except FileNotFoundError:
-            raise MCPError(METHOD_NOT_FOUND, f"file not found: {path}")
-        except Exception as exc:
-            raise mapError(exc) from exc
+        entry = await self._offload(statEntry, target)
         return formatEntry(entry)
 
     async def shell(self, command: str, workdir: str = ".") -> str:
@@ -227,12 +238,19 @@ class Tools:
         Use this to compile code, run tests, inspect binaries, or check tool
         availability. The command runs in a subprocess with a timeout.
 
-        If your access is read-only the command runs against a private throwaway
-        copy of the workspace, not the workspace itself. Build it, edit it, break
-        it: nothing you do there reaches the real files, and the copy keeps its
-        state between your commands so a build followed by a test works. Because
-        of that, never report a file as changed on the strength of a shell
-        command alone.
+        If your access is read-only the command runs against a throwaway copy of
+        the workspace that belongs to you alone, not the workspace itself. Build
+        it, edit it, break it: nothing you do there reaches the real files, no
+        other agent sees it, and it keeps its state between your commands so a
+        build followed by a test works. Because of that, never report a file as
+        changed on the strength of a shell command alone. The copy carries no
+        git history, so git commands do not work inside it: use git_diff,
+        git_log and git_blame, which always read the real workspace.
+
+        If your access is read-write the command runs against the real workspace.
+        Files the verdict does not allow you to write must be exactly as you found
+        them when the command ends: creating, deleting or modifying any of them is
+        reported back to you as a warning and has to be undone.
 
         command: the shell command to execute.
         workdir: subdirectory of the workspace to run in; defaults to the workspace root.
@@ -254,18 +272,19 @@ class Tools:
         effective = rewriteCommand(command) if self.rtk else command
         if self.logger and effective != command:
             self.logger.info("shell via %s: %s", RTK, effective)
-        before = {} if confined else self._auditBefore()
+        before = None if confined else self._auditBefore()
         try:
             proc = await asyncio.create_subprocess_shell(
                 effective,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 cwd=str(target),
+                start_new_session=True,
             )
             try:
                 stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=self.shellTimeout)
             except TimeoutError:
-                proc.kill()
+                await _terminateGroup(proc)
                 raise MCPError(
                     INVALID_PARAMS,
                     f"command timed out after {self.shellTimeout}s: {command[:80]}",
@@ -283,29 +302,34 @@ class Tools:
     async def _shellRoot(self) -> tuple[Path, bool]:
         if self.sandbox is None or CURRENT_ACCESS.get() == READ_WRITE:
             return self.workspace, False
-        root = await self.sandbox.path()
+        agent = CURRENT_AGENT.get()
+        root = await self.sandbox.path(agent)
         if self.logger:
-            self.logger.info("shell confined to the throwaway copy at %s", root)
+            self.logger.info("shell for '%s' confined to its throwaway copy at %s", agent, root)
         return root, True
 
-    def _auditBefore(self) -> dict:
+    def _auditBefore(self) -> dict | None:
         if self.scope is None or self.scope.allowed is None:
-            return {}
-        return snapshot(self.workspace, self.ignore, self.tracked)
+            return None
+        return snapshot(self.workspace, self.ignore)
 
-    def _auditAfter(self, before: dict) -> str:
-        if not before:
+    def _auditAfter(self, before: dict | None) -> str:
+        if before is None:
             return ""
-        touched = [path for path in modified(before, snapshot(self.workspace, self.ignore, self.tracked))
-                   if not self.scope.permits(path)]
+        touched = [
+            path
+            for path in modified(before, snapshot(self.workspace, self.ignore))
+            if not self.scope.permits(path)
+        ]
         if not touched:
             return ""
         shown = ", ".join(relPath(Path(path), self.workspace) for path in touched)
         if self.logger:
-            self.logger.warning("shell modified files outside the verdict scope: %s", shown)
+            self.logger.warning("shell changed files outside the verdict scope: %s", shown)
         return (
-            f"\n\nWARNING: this command modified files the verdict does not allow you to write: {shown}. "
-            "Undo those changes; only the files the verdict lists may differ from what was there before."
+            f"\n\nWARNING: this command created, deleted or modified files the verdict does not "
+            f"allow you to write: {shown}. Undo those changes; only the files the verdict lists "
+            "may differ from what was there before."
         )
 
     async def git_diff(self, staged: bool = False) -> str:

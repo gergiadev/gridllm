@@ -67,7 +67,7 @@ async def _probe_tool_channels(clients: list[LLMClient]) -> None:
         raise AgentError("tool channel preflight failed:\n  " + "\n  ".join(broken))
 
 
-def _build_grid(config: GridConfig, scope=None, bus: EventBus | None = None) -> Grid:
+async def _build_grid(config: GridConfig, scope=None, bus: EventBus | None = None) -> Grid:
     def client(agent):
         trace = Tracer(agent.name, agent.debug)
         toolbox = Toolbox(config.mcp.url_for(agent.name), trace, agent=agent.name, bus=bus)
@@ -82,7 +82,7 @@ def _build_grid(config: GridConfig, scope=None, bus: EventBus | None = None) -> 
     for llm in grid:
         llm.compactor = Compactor(chosen or llm, llm.trace)
 
-    asyncio.run(_probe_tool_channels(grid))
+    await _probe_tool_channels(grid)
 
     return Grid(worker=worker, thinkers=thinkers, judge=judge, settings=config.debate, bus=bus, scope=scope)
 
@@ -129,13 +129,7 @@ def _parse_args() -> tuple[str, bool]:
     return task, args.tui
 
 
-def _run_plain(config: GridConfig, task: str) -> None:
-    server = _start_server(config)
-    grid = _build_grid(config, scope=server.scope, bus=None)
-    print(asyncio.run(grid.run(task)))
-
-
-def _run_tui(config: GridConfig, task: str) -> None:
+def _load_tui():
     try:
         from .tui import run_tui
     except ImportError as exc:
@@ -144,24 +138,34 @@ def _run_tui(config: GridConfig, task: str) -> None:
             "install it with: uv tool install . --with gridllm[gui]\n"
             f"(missing dependency: {exc.name})"
         ) from exc
+    return run_tui
+
+
+async def _run_plain(config: GridConfig, task: str) -> None:
+    server = _start_server(config)
+    grid = await _build_grid(config, scope=server.scope, bus=None)
+    print(await grid.run(task))
+
+
+async def _run_tui(config: GridConfig, task: str, run_tui) -> None:
     server = _start_server(config)
     bus = EventBus()
-    grid = _build_grid(config, scope=server.scope, bus=bus)
-    run_tui(grid, task, bus)
+    grid = await _build_grid(config, scope=server.scope, bus=bus)
+    await run_tui(grid, task, bus)
 
 
 def main() -> None:
+    _bootstrap()
     task, use_tui = _parse_args()
 
-    _bootstrap()
     load_dotenv(paths.env_path())
     setup_logging(str(paths.log_dir()), LOG_FILE)
     config = load_config(paths.config_path())
 
     if use_tui:
-        _run_tui(config, task)
+        asyncio.run(_run_tui(config, task, _load_tui()))
     else:
-        _run_plain(config, task)
+        asyncio.run(_run_plain(config, task))
 
 
 if __name__ == "__main__":

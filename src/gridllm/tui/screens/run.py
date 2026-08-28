@@ -44,7 +44,7 @@ ROWS = {
 
 
 class ExecutionScreen(Screen):
-    BINDINGS = [  # noqa: RUF012 - Textual idiom
+    BINDINGS = [  # noqa: RUF012
         Binding("ctrl+t", "toggle('tools')", "Tools", show=True),
         Binding("ctrl+d", "toggle('debate')", "Debate", show=True),
         Binding("ctrl+v", "toggle('verdict')", "Verdict", show=True),
@@ -153,7 +153,7 @@ class ExecutionScreen(Screen):
             result = await self.grid.run(self._grid_task)
             self._exec_log().write(f"[green]done[/green]\n{result[:1500]}")
             self._set_status("done")
-        except Exception as exc:  # noqa: BLE001 - don't kill the TUI on grid errors
+        except Exception as exc:  # noqa: BLE001
             self._exec_log().write(f"[red]grid error:[/red] {exc}")
             self._log_log().write(f"[red]grid error:[/red] {exc}")
             self._set_status("error")
@@ -210,7 +210,7 @@ class ExecutionScreen(Screen):
         elif kind == KIND_EXECUTION_DONE:
             self._exec_log().write(f"result:\n{p.get('result','')[:1500]}")
         elif kind == KIND_RUN_DONE:
-            self._log_log().write("[green]run done[/green]")
+            self._log_log().write(f"[green]run done[/green] transcript: {p.get('transcript','')}")
         elif kind == KIND_FINDING:
             lines = p.get("lines", [])
             lines_str = ",".join(str(l) for l in lines) if lines else "?"
@@ -237,7 +237,7 @@ class ExecutionScreen(Screen):
     def action_toggle(self, panel_id: str) -> None:
         try:
             widget = self.query_one(f"#{panel_id}")
-        except Exception:  # noqa: BLE001 - widget may not be mounted yet
+        except Exception:  # noqa: BLE001
             return
         widget.display = not widget.display
         self._sync_rows()
@@ -246,7 +246,7 @@ class ExecutionScreen(Screen):
         for row, panels in ROWS.items():
             try:
                 container = self.query_one(f"#{row}")
-            except Exception:  # noqa: BLE001, S112 - widget may not be mounted yet
+            except Exception:  # noqa: BLE001, S112
                 continue
             container.display = any(self.query_one(f"#{panel}").display for panel in panels)
 
@@ -271,7 +271,7 @@ class ExecutionScreen(Screen):
         }
         try:
             self.query_one("#taskbar", Label).update(self._taskbar_text(icons.get(status, status)))
-        except Exception:  # noqa: BLE001, S110 - widget may not be mounted yet
+        except Exception:  # noqa: BLE001, S110
             pass
 
     def _agent_budgets(self) -> dict[str, int]:

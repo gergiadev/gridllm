@@ -1,4 +1,5 @@
 import json
+from collections.abc import Iterator
 
 from pydantic import BaseModel, ValidationError
 
@@ -25,7 +26,7 @@ def repair(text: str, schema: type[BaseModel]) -> str:
     )
 
 
-def extract(text: str) -> dict:
+def candidates(text: str) -> Iterator[dict]:
     for start, char in enumerate(text or ""):
         if char != "{":
             continue
@@ -34,14 +35,24 @@ def extract(text: str) -> dict:
         except ValueError:
             continue
         if isinstance(value, dict):
-            return value
+            yield value
 
+
+def extract(text: str) -> dict:
+    for value in candidates(text):
+        return value
     raise ValueError("no json object found in the response")
 
 
 def convert(text: str, schema: type[BaseModel]):
-    value = extract(text)
-    try:
-        return schema.model_validate(value)
-    except ValidationError as error:
-        raise ValueError(f"json does not conform to {schema.__name__}: {error}") from error
+    failure: ValidationError | None = None
+
+    for value in candidates(text):
+        try:
+            return schema.model_validate(value)
+        except ValidationError as error:
+            failure = error
+
+    if failure is None:
+        raise ValueError("no json object found in the response")
+    raise ValueError(f"json does not conform to {schema.__name__}: {failure}") from failure

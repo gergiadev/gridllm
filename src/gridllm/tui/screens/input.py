@@ -8,7 +8,7 @@ from textual.widgets import Button, Label, TextArea
 
 
 class TaskInputScreen(Screen):
-    BINDINGS = [  # noqa: RUF012 - Textual idiom
+    BINDINGS = [  # noqa: RUF012
         Binding("enter", "submit", "Submit"),
         Binding("escape", "app.quit", "Quit"),
     ]

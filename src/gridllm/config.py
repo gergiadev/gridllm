@@ -2,10 +2,19 @@ import os
 from pathlib import Path
 from typing import Literal
 
+import litellm
 import yaml
-from pydantic import BaseModel, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from .GridMCPServer import DEFAULT_IGNORE, DEFAULT_MAX_BYTES, DEFAULT_MAX_TOOL_CHARS
+
+
+def _model_limits(model: str) -> tuple[int | None, int | None]:
+    try:
+        info = litellm.get_model_info(model)
+    except Exception:  # noqa: BLE001
+        return None, None
+    return info.get("max_input_tokens"), info.get("max_output_tokens")
 
 
 class LLMParams(BaseModel):
@@ -32,6 +41,22 @@ class LLMParams(BaseModel):
         if not os.getenv(name):
             raise ValueError(f"environment variable {name} is not set")
         return name
+
+    @model_validator(mode="after")
+    def _budget_fits_the_model(self) -> "LLMParams":
+        window, output = _model_limits(self.model)
+        if output is not None and self.max_output_tokens > output:
+            raise ValueError(
+                f"{self.model}: max_output_tokens {self.max_output_tokens} exceeds the "
+                f"{output} the model can emit"
+            )
+        if window is not None and self.max_input_tokens + self.max_output_tokens > window:
+            raise ValueError(
+                f"{self.model}: max_input_tokens {self.max_input_tokens} plus max_output_tokens "
+                f"{self.max_output_tokens} exceeds the {window} token context window, so no "
+                "request can ever be served"
+            )
+        return self
 
     @property
     def api_key(self) -> str:
@@ -65,7 +90,14 @@ class DebateConfig(BaseModel):
     max_exchanges: int = 5
     min_exchanges: int = 2
     confidence_threshold: float = 0.8
-    verify_execution: bool = True
+    verify_execution: bool = Field(
+        default=True,
+        description=(
+            "Ask the judge to re-read the changed files and report whether the verdict was "
+            "applied. The outcome is reported, not enforced: a rejected review is surfaced as "
+            "an error and appended to the result, but the run still ends and nothing is undone."
+        ),
+    )
 
     @model_validator(mode="after")
     def _exchanges_are_consistent(self) -> "DebateConfig":

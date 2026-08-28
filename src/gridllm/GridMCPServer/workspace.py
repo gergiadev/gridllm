@@ -1,4 +1,5 @@
 import os
+import re
 import tempfile
 from collections.abc import Iterable
 from fnmatch import fnmatch
@@ -8,6 +9,8 @@ from mcp import MCPError
 from mcp.types import INVALID_PARAMS
 
 ROOT_ALIASES = ("", ".", "./", ".\\", "/", "*", "**")
+
+BRACES = re.compile(r"\{([^{}]*)\}")
 
 
 def _normalize(workspace: Path, path: str) -> str:
@@ -78,3 +81,20 @@ def writeAtomic(target: Path, content: str) -> int:
             pass
         raise
     return len(content)
+
+
+def expandBraces(pattern: str) -> list[str]:
+    match = BRACES.search(pattern)
+    if match is None:
+        return [pattern]
+    head, tail = pattern[:match.start()], pattern[match.end():]
+    return [
+        expanded
+        for choice in match.group(1).split(",")
+        for expanded in expandBraces(f"{head}{choice.strip()}{tail}")
+    ]
+
+
+def matchesInclude(relative: str, patterns: Iterable[str]) -> bool:
+    name = relative.rsplit("/", 1)[-1]
+    return any(fnmatch(relative, pattern) or fnmatch(name, pattern) for pattern in patterns)
