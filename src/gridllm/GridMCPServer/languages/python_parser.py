@@ -39,6 +39,10 @@ def _assignedNames(node: ast.AST) -> list[str]:
     return [target.id for target in node.targets if isinstance(target, ast.Name)]
 
 
+def _startLine(node: ast.AST) -> int:
+    return min([node.lineno, *(decorator.lineno for decorator in getattr(node, "decorator_list", ()))])
+
+
 def _toEntry(node: ast.AST, sourceLines: list[str], inClass: bool) -> dict | None:
     if isinstance(node, _DEFINITIONS):
         name = node.name
@@ -52,7 +56,7 @@ def _toEntry(node: ast.AST, sourceLines: list[str], inClass: bool) -> dict | Non
     return {
         "kind": _kindOf(node, inClass),
         "name": name,
-        "line": node.lineno,
+        "line": _startLine(node),
         "endLine": getattr(node, "end_lineno", node.lineno),
         "signature": _signature(node, sourceLines),
         "docstring": _docstring(node),
@@ -83,24 +87,6 @@ def _walk(
         _walk(child, sourceLines, inClass, inFunction, acc)
 
 
-def _bodyEntry(node: ast.AST, sourceLines: list[str]) -> dict:
-    start = node.lineno
-    end = getattr(node, "end_lineno", start)
-    body = "\n".join(sourceLines[start - 1:end])
-    kind = "class"
-    if isinstance(node, ast.AsyncFunctionDef):
-        kind = "async function"
-    elif isinstance(node, ast.FunctionDef):
-        kind = "function"
-    return {
-        "kind": kind,
-        "name": node.name,
-        "line": start,
-        "endLine": end,
-        "body": body,
-    }
-
-
 @register_parser(".py")
 class PythonParser(SourceParser):
 
@@ -110,12 +96,3 @@ class PythonParser(SourceParser):
         acc: list[dict] = []
         _walk(tree, sourceLines, False, False, acc)
         return acc
-
-    def getSymbolBody(self, sourceText: str, symbolName: str) -> list[dict]:
-        lines = sourceText.splitlines()
-        tree = ast.parse(sourceText)
-        return [
-            _bodyEntry(node, lines)
-            for node in ast.walk(tree)
-            if isinstance(node, _DEFINITIONS) and node.name == symbolName
-        ]

@@ -12,7 +12,7 @@ Four roles, one shared MCP server:
 | `thinker-1`, `thinker-2` | **r** | debate as proposer and opponent, roles swapping each exchange |
 | `judge` | **r** | always turns the whole debate into the final verdict |
 
-Permissions are enforced, not conventional. The MCP server hides write tools from read-only agents and refuses to run them anyway.
+Permissions on the write tools are enforced, not conventional. The MCP server hides `write_file` and `edit_file` from read-only agents and refuses to run them anyway. The `shell` tool is not a jail: a read-only agent starts in a throwaway copy of the workspace, but a command that names a path outside that copy still reaches it. The API keys named by `api_key_env` are removed from the environment of every shell command.
 
 ## Features
 
@@ -20,7 +20,7 @@ Two thinkers debate as proposer and opponent, a judge decides, and a worker exec
 
 The debate runs in exchanges. In each exchange one thinker is the **proposer** and every other thinker is an **opponent** whose job is to refute the proposal, not to replace it, and the roles swap at the next exchange. Proposals and objections are separate structures, not free text: an opponent files objections with the evidence it read, gridllm gives each one an id, and the next proposer has to close them by id. The debate ends only when the objection ledger is empty, every opponent accepts, the proposer reports `concluded` above `confidence_threshold`, and at least `min_exchanges` exchanges have run (a proposal nobody ever contested cannot close the debate). Otherwise it runs to `max_exchanges`. Either way the judge receives the transcript, the objections still open and the deduplicated findings, and produces the instruction the worker carries out.
 
-The verdict names the files the worker is allowed to write, and the MCP server refuses every other path for the duration of the execution. The worker reports which files it changed, gridllm compares that with what was actually written, and the judge re-reads the result and approves or rejects it. Every exchange is saved to `./.gridllm/runs/`, so a failure late in the run does not throw the debate away; a single agent that fails takes down its own turn, not the run.
+The verdict names the files the worker is allowed to write, and the MCP server refuses every other path for the duration of the execution. The worker reports which files it changed, gridllm compares that with what actually changed on disk, and the judge re-reads the result and approves or rejects it; a rejected review ends the plain CLI with exit status 1. Every exchange is saved to `./.gridllm/runs/`, so a failure late in the run does not throw the debate away; a single agent that fails takes down its own turn, not the run.
 
 There is an optional TUI built with Textual, with live panels for debate, tools, verdict, execution, findings and logs. When rtk is on the PATH it is preferred for file reading. `max_input_tokens` is checked before every call, and older turns get summarised instead of letting the job fail. Each agent can use a different LiteLLM provider and API key.
 
@@ -62,7 +62,7 @@ One exchange of the debate, with two thinkers:
                 judge   <- review of what was actually written
 ```
 
-The MCP server runs in-process on `127.0.0.1:12300/mcp` (configurable), and each agent connects to the same URL. The `?agent=` query parameter tells the `PermissionFilter` middleware which role is calling. Read-only agents get a filtered `tools/list` and are refused on `tools/call` for write tools. During execution the same middleware also holds the verdict's write scope: the worker keeps its `rw` access but every path outside `allowed_files` is refused until the execution ends.
+The MCP server runs in-process on `127.0.0.1:12300/mcp` (configurable), and each agent connects to the same URL. If the port is already taken, for instance by another gridllm, the run stops at startup: give each concurrent run its own `mcp.port`. The `?agent=` query parameter tells the `PermissionFilter` middleware which role is calling. Read-only agents get a filtered `tools/list` and are refused on `tools/call` for write tools. During execution the same middleware also holds the verdict's write scope: the worker keeps its `rw` access but every path outside `allowed_files` is refused until the execution ends.
 
 ### Symbol tools
 
@@ -116,7 +116,7 @@ cd gridllm
 
 To save some tokens, **rtk** has been introduced: if [rtk](https://github.com/rtk-ai/rtk) is installed and on the `PATH`, `gridllm` uses it for `read_file` instead of native Python reading, and routes the noisy inspection commands an agent runs through `shell` (`ls`, `tree`, `find`, `grep`, `rg`, `wc`, `git`) through the matching rtk subcommand. On a real workspace that turns a 1926-byte `ls -la` into 550 bytes and a 3494-byte `find` into 555. Detection is automatic at startup, so no configuration is needed.
 
-The rewrite only ever touches the first word of a shell segment, and leaves alone anything quoted, any segment with a redirection, and commands whose output would be read back by another tool.
+The rewrite only ever touches the first word of a shell segment, and leaves alone anything quoted, any segment with a redirection, and any command whose output is piped into another one.
 
 To install rtk:
 
@@ -208,7 +208,7 @@ Write your API keys in `~/.config/gridllm/.env` (see above) and run again.
 | `~/.config/gridllm/.env` | API keys |
 | `./.gridllm/logs/grid.log` | per-project log for all agents |
 | `./.gridllm/logs/tui.stdout.log` | stdio redirect when the TUI is running |
-| `./.gridllm/runs/<timestamp>.json` | debate transcript and objection ledger, saved after every exchange |
+| `./.gridllm/runs/<timestamp>.json` | debate transcript and objection ledger, saved after every exchange, then the verdict, the worker's report and the review |
 
 Configuration and API keys live under XDG (`~/.config/gridllm/`). `XDG_CONFIG_HOME` and `GRIDLLM_CONFIG` are honoured (the latter points to an alternative config file, handy for keeping one per project).
 
@@ -245,7 +245,7 @@ cd ~/projects/my-firmware
 gridllm "find the out-of-bounds accesses in parser.c"
 ```
 
-> **Warning:** the `worker` has write access to the directory you launch the command from. The agents are confined there (paths that escape it are rejected) but inside that fence they can modify files.
+> **Warning:** the `worker` has write access to the directory you launch the command from. The file tools are confined there (paths that escape it are rejected) but inside that fence they can modify files, and `shell` commands are not sandboxed by the operating system.
 
 ### With the TUI
 
@@ -270,7 +270,6 @@ Interactive terminal UI, styled after opencode, built with [Textual](https://git
 | FINDINGS | `file:lines` with summary for each finding | off |
 | LOG | low-level LLM/tool log | off |
 | TOKENS | per-agent token usage (prompt/completion/total) with budget bar | off |
-| SIDEBAR | one-shot `list_files` snapshot of the workspace | off |
 
 ### Keymap
 
@@ -283,8 +282,6 @@ Interactive terminal UI, styled after opencode, built with [Textual](https://git
 | CTRL+F | toggle FINDINGS |
 | CTRL+L | toggle LOG |
 | CTRL+N | toggle TOKENS |
-| CTRL+B | toggle SIDEBAR |
-| CTRL+R | refresh SIDEBAR |
 | F1 / CTRL+H | help |
 | CTRL+Q / q | quit |
 
@@ -303,7 +300,7 @@ Each agent has an independent level in `config.yml`, and they all write to the s
 
 ## Token limits
 
-`max_output_tokens` caps generation, while `max_input_tokens` is the context window and is checked before every call. When the limit gets close, the oldest part of the conversation is summarised by the worker's model instead of letting the job fail.
+`max_output_tokens` caps generation, while `max_input_tokens` is the context window and is checked before every call. When the limit gets close, the oldest part of the conversation is summarised instead of letting the job fail, by the agent's own model or by the `summarizer` agent if one is configured.
 
 ## Tool rounds
 

@@ -7,6 +7,7 @@ THRESHOLD = 0.8
 MAX_SUMMARY_TOKENS = 2000
 MAX_BLOCK_CHARS = 4000
 MAX_TOOL_CHARS = 8000
+MAX_SUMMARY_INPUT_CHARS = 200_000
 
 SYSTEM_PROMPT = """Summarize the operations already carried out in a conversation between an agent and its tools.
 Keep: files read, relevant contents, results obtained, errors encountered.
@@ -19,6 +20,14 @@ def _carries_tool_output(message: dict) -> bool:
         return True
     content = message.get("content")
     return isinstance(content, str) and content.startswith(MIRROR_HEADER)
+
+
+def _describe(message: dict) -> str:
+    calls = "".join(
+        f" {call['function']['name']}({call['function']['arguments']})"
+        for call in message.get("tool_calls") or []
+    )
+    return f"[{message.get('role')}]{calls} {str(message.get('content') or '')[:MAX_BLOCK_CHARS]}"
 
 
 class Compactor:
@@ -43,16 +52,6 @@ class Compactor:
         if len(groups) >= 2:
             summary = await self._summarize(groups[:-1])
             messages = head + [{"role": "user", "content": summary}] + groups[-1]
-            if self._fits(messages, tools, model, budget):
-                return messages
-
-        head, groups = self._partition(messages)
-        while len(groups) > 1:
-            groups = groups[1:]
-            messages = head + [message for group in groups for message in group]
-            self.trace.prompt(f"compaction: dropped the oldest block, {len(groups)} left")
-            if self._fits(messages, tools, model, budget):
-                return messages
 
         return messages
 
@@ -93,10 +92,6 @@ class Compactor:
 
     @traced
     async def _summarize(self, groups: list[list[dict]]) -> str:
-        text = "\n".join(
-            f"[{m.get('role')}] {str(m.get('content') or '')[:MAX_BLOCK_CHARS]}"
-            for group in groups
-            for m in group
-        )
-        summary = await self.summarizer.plain(SYSTEM_PROMPT, text, MAX_SUMMARY_TOKENS)
+        text = "\n".join(_describe(message) for group in groups for message in group)
+        summary = await self.summarizer.plain(SYSTEM_PROMPT, text[-MAX_SUMMARY_INPUT_CHARS:], MAX_SUMMARY_TOKENS)
         return f"Summary of previous operations:\n{summary}"

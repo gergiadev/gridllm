@@ -1,3 +1,5 @@
+import socket
+
 import pytest
 
 from gridllm import gridllm, paths
@@ -48,3 +50,11 @@ def test_bootstrap_leaves_an_existing_config_untouched(fresh_home):
     destination.write_text("mine\n", encoding="utf-8")
     gridllm._bootstrap()
     assert destination.read_text(encoding="utf-8") == "mine\n"
+
+
+def test_a_taken_port_stops_the_startup():
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as taken:
+        taken.bind(("127.0.0.1", 0))
+        taken.listen()
+        with pytest.raises(SystemExit, match="cannot start the MCP server"):
+            gridllm._ensure_port_free("127.0.0.1", taken.getsockname()[1])

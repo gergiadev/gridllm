@@ -20,6 +20,7 @@ from .events import (
     KIND_VERDICT,
     EventBus,
 )
+from .GridMCPServer.sandbox import modified, snapshot
 from .GridMCPServer.workspace import relPath, resolveSafe
 from .LLMClient import AgentError, LLMClient
 from .messages import (
@@ -57,6 +58,7 @@ class Grid:
         settings: DebateConfig | None = None,
         bus: EventBus | None = None,
         scope=None,
+        ignore: tuple[str, ...] = (),
     ):
         self.worker = worker
         self.thinkers = thinkers
@@ -64,7 +66,10 @@ class Grid:
         self.settings = settings or DebateConfig()
         self.bus = bus
         self.scope = scope
+        self.ignore = ignore
+        self.approved = True
         self.transcript_path = paths.run_path()
+        self._record: dict = {}
         self._seen_findings: set[tuple] = set()
 
     async def run(self, task: str) -> str:
@@ -227,13 +232,16 @@ class Grid:
         EventBus.emit_to(self.bus, KIND_ERROR, {"error": message}, agent)
 
     def _persist(self, task: str, history: list[Turn], ledger: debate.ObjectionLedger) -> None:
-        payload = {
-            "task": task,
-            "turns": [turn.model_dump(mode="json") for turn in history],
-            "objections": [entry.model_dump(mode="json") for entry in ledger.entries],
-        }
+        self._save(
+            task=task,
+            turns=[turn.model_dump(mode="json") for turn in history],
+            objections=[entry.model_dump(mode="json") for entry in ledger.entries],
+        )
+
+    def _save(self, **sections) -> None:
+        self._record.update(sections)
         try:
-            self.transcript_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            self.transcript_path.write_text(json.dumps(self._record, indent=2), encoding="utf-8")
         except OSError as error:
             self._report(None, f"could not save the transcript: {error}")
 
@@ -273,13 +281,15 @@ class Grid:
             },
             self.judge.name,
         )
+        self._save(verdict=verdict.model_dump(mode="json"))
         return verdict
 
     async def _execute(self, task: str, verdict: Verdict) -> str:
         if not verdict.allowed_files:
             self._report(self.judge.name, "the verdict allows no file to be written")
 
-        self.worker.toolbox.touched.clear()
+        workspace = paths.workspace()
+        before = await asyncio.to_thread(snapshot, workspace, self.ignore)
         if self.scope is not None:
             self.scope.allow(verdict.allowed_files)
 
@@ -293,8 +303,8 @@ class Grid:
             if self.scope is not None:
                 self.scope.clear()
 
-        workspace = paths.workspace()
-        touched = {_norm(path, workspace) for path in self.worker.toolbox.touched}
+        after = await asyncio.to_thread(snapshot, workspace, self.ignore)
+        touched = {relPath(Path(path), workspace) for path in modified(before, after)}
         declared = {_norm(path, workspace) for path in report.changed_files}
         if declared != touched:
             self._report(
@@ -303,6 +313,7 @@ class Grid:
                 f"{sorted(touched) or '[]'}",
             )
 
+        self._save(report=report.model_dump(mode="json"), changed=sorted(touched))
         review = await self._review(verdict, report, touched)
 
         lines = [report.summary, f"status: {report.status}", f"changed: {', '.join(sorted(touched)) or '(none)'}"]
@@ -332,6 +343,8 @@ class Grid:
             {"approved": review.approved, "note": review.note},
             self.judge.name,
         )
+        self._save(review=review.model_dump(mode="json"))
+        self.approved = review.approved
         if not review.approved:
             self._report(self.judge.name, f"review rejected the execution: {review.note}")
         return review

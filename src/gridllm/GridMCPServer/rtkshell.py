@@ -14,6 +14,7 @@ RTK_COMMANDS = {
 }
 
 SEPARATORS = ("&&", "||")
+PIPE = "|"
 BREAK_CHARS = "|&;()"
 REDIRECT_CHARS = "<>"
 QUOTE_CHARS = "'\""
@@ -90,4 +91,8 @@ def rewriteCommand(command: str) -> str:
     pieces, ok = _scan(command)
     if not ok:
         return command
-    return "".join(_rewriteSegment(text) if eligible else text for text, eligible in pieces)
+    feeds = [following[0] == PIPE for following in pieces[1:]] + [False]
+    return "".join(
+        _rewriteSegment(text) if eligible and not piped else text
+        for (text, eligible), piped in zip(pieces, feeds, strict=True)
+    )

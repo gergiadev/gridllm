@@ -153,3 +153,30 @@ def test_capped_keeps_the_wrapped_signature():
     wrapped = capped(Tools.read_file, 10)
     assert wrapped.__name__ == "read_file"
     assert "offset" in inspect.signature(wrapped).parameters
+
+
+async def test_a_window_can_be_read_from_a_file_over_the_size_limit(tools, workspace):
+    (workspace / "huge.c").write_text("x" * 99 + "\n" + "wanted\n" + "y" * 1_000_000, encoding="utf-8")
+    with pytest.raises(MCPError, match="too large"):
+        await tools.read_file("huge.c")
+    assert await tools.read_file("huge.c", offset=2, limit=1) == "wanted"
+
+
+async def test_symbols_of_a_missing_path_report_a_clean_error(tools):
+    with pytest.raises(MCPError, match="no such file or directory"):
+        await tools.list_symbols("nope")
+
+
+async def test_shell_does_not_inherit_the_api_keys(tools, monkeypatch):
+    monkeypatch.setenv("GRID_TEST_KEY", "sk-secret")
+    monkeypatch.setenv("GRID_TEST_PLAIN", "visible")
+    tools.secretEnv = frozenset({"GRID_TEST_KEY"})
+    try:
+        output = await tools.shell("echo [$GRID_TEST_KEY] [$GRID_TEST_PLAIN]")
+    finally:
+        tools.sandbox.remove()
+    assert "[] [visible]" in output
+
+
+async def test_git_tools_report_when_there_is_no_repository(tools):
+    assert "not a git repository" in (await tools.git_diff()).lower()

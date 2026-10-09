@@ -7,10 +7,12 @@ from gridllm.GridMCPServer.rtkshell import rewriteCommand
     ("command", "expected"),
     [
         ("ls -la", "rtk ls -la"),
-        ("grep -n foo *.c | wc -l", "rtk grep -n foo *.c | rtk wc -l"),
+        ("grep -n foo *.c | wc -l", "grep -n foo *.c | rtk wc -l"),
         ("cd src && ls", "cd src && rtk ls"),
         ("find . -name '*.c'", "rtk find . -name '*.c'"),
         ("make 2>&1 | grep error", "make 2>&1 | rtk grep error"),
+        ("ls | wc -l", "ls | rtk wc -l"),
+        ("find . -name '*.c' | xargs grep x", "find . -name '*.c' | xargs grep x"),
     ],
 )
 def test_known_commands_are_proxied(command, expected):

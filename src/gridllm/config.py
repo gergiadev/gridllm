@@ -8,6 +8,8 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from .GridMCPServer import DEFAULT_IGNORE, DEFAULT_MAX_BYTES, DEFAULT_MAX_TOOL_CHARS
 
+ACCESS_BY_ROLE = {"worker": "rw", "thinker": "r", "judge": "r"}
+
 
 def _model_limits(model: str) -> tuple[int | None, int | None]:
     try:
@@ -65,7 +67,7 @@ class LLMParams(BaseModel):
 
 class AgentConfig(BaseModel):
     role: Literal["worker", "thinker", "judge"]
-    name: str
+    name: str = Field(pattern=r"^[A-Za-z0-9_.-]+$")
     access: Literal["r", "rw"]
     llm_params: LLMParams
     debug: Literal[0, 1, 2, 3] = 0
@@ -89,7 +91,7 @@ class MCPConfig(BaseModel):
 class DebateConfig(BaseModel):
     max_exchanges: int = 5
     min_exchanges: int = 2
-    confidence_threshold: float = 0.8
+    confidence_threshold: float = Field(default=0.8, ge=0, le=1)
     verify_execution: bool = Field(
         default=True,
         description=(
@@ -129,6 +131,20 @@ class GridConfig(BaseModel):
         return self
 
     @model_validator(mode="after")
+    def _agents_are_coherent(self) -> "GridConfig":
+        names = [agent.name for agent in self.grid]
+        repeated = sorted({name for name in names if names.count(name) > 1})
+        if repeated:
+            raise ValueError(f"agent names must be unique, repeated: {', '.join(repeated)}")
+        for agent in self.grid:
+            expected = ACCESS_BY_ROLE[agent.role]
+            if agent.access != expected:
+                raise ValueError(
+                    f"{agent.name}: a {agent.role} needs access '{expected}', found '{agent.access}'"
+                )
+        return self
+
+    @model_validator(mode="after")
     def _summarizer_exists(self) -> "GridConfig":
         names = {agent.name for agent in self.grid}
         if self.summarizer is not None and self.summarizer not in names:
@@ -137,6 +153,9 @@ class GridConfig(BaseModel):
 
     def access_from_agent(self) -> dict[str, str]:
         return {agent.name: agent.access for agent in self.grid}
+
+    def secret_env(self) -> set[str]:
+        return {agent.llm_params.api_key_env for agent in self.grid}
 
     def by_role(self, role: str) -> list[AgentConfig]:
         return [agent for agent in self.grid if agent.role == role]

@@ -8,16 +8,13 @@ class AgentTokens:
     total: int = 0
     calls: int = 0
     budget: int = 0
-
-    @property
-    def remaining(self) -> int:
-        return max(0, self.budget - self.total)
+    window: int = 0
 
     @property
     def used_pct(self) -> float:
         if self.budget <= 0:
             return 0.0
-        return min(100.0, (self.total / self.budget) * 100.0)
+        return min(100.0, (self.window / self.budget) * 100.0)
 
 
 def bar(used_pct: float, width: int = 12) -> str:

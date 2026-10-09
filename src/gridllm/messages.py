@@ -1,6 +1,6 @@
 from enum import Enum
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class Status(str, Enum):
@@ -34,7 +34,7 @@ class Proposal(BaseModel):
     resolves: list[Resolution] = []
     findings: list[Finding] = []
     status: Status
-    confidence: float
+    confidence: float = Field(ge=0, le=1)
 
 
 class Rebuttal(BaseModel):
@@ -42,7 +42,7 @@ class Rebuttal(BaseModel):
     accepts: bool
     findings: list[Finding] = []
     status: Status
-    confidence: float
+    confidence: float = Field(ge=0, le=1)
 
 
 class TrackedObjection(BaseModel):

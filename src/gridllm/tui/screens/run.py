@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 
+from rich.markup import escape
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
@@ -38,7 +39,7 @@ MUTED = "#565f89"
 TITLE = "GridLLM"
 
 ROWS = {
-    "main": ("sidebar", "debate", "tools", "findings"),
+    "main": ("debate", "tools", "findings"),
     "mid": ("verdict", "exec"),
 }
 
@@ -52,8 +53,6 @@ class ExecutionScreen(Screen):
         Binding("ctrl+f", "toggle('findings')", "Findings", show=True),
         Binding("ctrl+l", "toggle('log')", "Log", show=True),
         Binding("ctrl+n", "toggle('tokens')", "Tokens", show=True),
-        Binding("ctrl+b", "toggle('sidebar')", "Sidebar", show=True),
-        Binding("ctrl+r", "refresh_sidebar", "Refresh", show=True),
         Binding("f1,ctrl+h", "help", "Help", show=True),
         Binding("ctrl+c,ctrl+q,q", "app.quit", "Quit", show=True),
     ]
@@ -90,7 +89,6 @@ class ExecutionScreen(Screen):
         text-style: bold;
         margin-bottom: 0;
     }
-    #sidebar { width: 24; display: none; }
     #verdict { display: none; }
     #findings { display: none; }
     #log { height: 1fr; min-height: 5; }
@@ -109,9 +107,6 @@ class ExecutionScreen(Screen):
     def compose(self) -> ComposeResult:
         yield Label(self._taskbar_text(), id="taskbar")
         with Horizontal(id="main"):
-            with Vertical(id="sidebar", classes="panel"):
-                yield Label("FILES  (CTRL+B)", classes="panel-title")
-                yield RichLog(id="sidebar-content", markup=True)
             with Vertical(id="debate", classes="panel"):
                 yield Label("DEBATE  (CTRL+D)", classes="panel-title")
                 yield RichLog(id="debate-content", markup=True)
@@ -151,23 +146,26 @@ class ExecutionScreen(Screen):
     async def _run_grid(self) -> None:
         try:
             result = await self.grid.run(self._grid_task)
-            self._exec_log().write(f"[green]done[/green]\n{result[:1500]}")
+            self._exec_log().write(f"[green]done[/green]\n{escape(result[:1500])}")
             self._set_status("done")
         except Exception as exc:  # noqa: BLE001
-            self._exec_log().write(f"[red]grid error:[/red] {exc}")
-            self._log_log().write(f"[red]grid error:[/red] {exc}")
+            self._exec_log().write(f"[red]grid error:[/red] {escape(str(exc))}")
+            self._log_log().write(f"[red]grid error:[/red] {escape(str(exc))}")
             self._set_status("error")
 
     async def _pump_events(self) -> None:
         async for event in self.bus.subscribe():
-            self._dispatch(event)
+            try:
+                self._dispatch(event)
+            except Exception as exc:  # noqa: BLE001
+                self._log_log().write(f"[red]render error:[/red] {escape(str(exc))}")
 
     def _dispatch(self, event: Event) -> None:
         kind = event.kind
         agent = event.agent or "-"
         agent_col = ROLE_COLORS.get(agent, MUTED)
         agent_tag = f"[{agent_col}]{agent}[/]"
-        p = event.payload
+        p = {key: escape(value) if isinstance(value, str) else value for key, value in event.payload.items()}
 
         if kind == KIND_DEBATE_ROUND:
             status = p.get("status", "?")
@@ -195,7 +193,7 @@ class ExecutionScreen(Screen):
             outcome = "consensus" if p.get("consensus") else "no consensus"
             self._verdict_log().write(f"[yellow]adjudication[/yellow] ({outcome}) -> {agent_tag}")
         elif kind == KIND_VERDICT:
-            allowed = ", ".join(p.get("allowed_files", [])) or "(none)"
+            allowed = escape(", ".join(p.get("allowed_files", []))) or "(none)"
             self._verdict_log().write(
                 f"* {agent_tag}\n  verdict: {p.get('verdict','')}\n  rationale: {p.get('rationale','')[:300]}\n  writable: {allowed}"
             )
@@ -217,7 +215,7 @@ class ExecutionScreen(Screen):
             self._findings_log().write(f"* {p.get('file','?')}:{lines_str}\n  {p.get('summary','')[:200]}")
         elif kind == KIND_TOOL_CALL:
             args = p.get("arguments", {})
-            self._tools_log().write(f"* {agent_tag} call {p.get('name','?')}\n  args: {str(args)[:200]}")
+            self._tools_log().write(f"* {agent_tag} call {p.get('name','?')}\n  args: {escape(str(args)[:200])}")
             self._log_log().write(f"[cyan]tool.call[/cyan] {agent} {p.get('name','?')}")
         elif kind == KIND_TOOL_RESULT:
             err = p.get("error", False)
@@ -250,17 +248,14 @@ class ExecutionScreen(Screen):
                 continue
             container.display = any(self.query_one(f"#{panel}").display for panel in panels)
 
-    async def action_refresh_sidebar(self) -> None:
-        self._sidebar_log().write(f"[{MUTED}]refreshing...[/]")
-
     def action_help(self) -> None:
         self._log_log().write(
             "keymap: CTRL+T tools, CTRL+D debate, CTRL+V verdict, CTRL+E exec, CTRL+F findings, "
-            "CTRL+L log, CTRL+N tokens, CTRL+B sidebar, CTRL+R refresh, CTRL+Q quit"
+            "CTRL+L log, CTRL+N tokens, CTRL+Q quit"
         )
 
     def _taskbar_text(self, status: str | None = None) -> str:
-        text = f"{TITLE} v{VERSION} (Beta) - Task: {self._grid_task}"
+        text = f"{TITLE} v{VERSION} (Beta) - Task: {escape(self._grid_task)}"
         return f"{text}  {status}" if status else text
 
     def _set_status(self, status: str) -> None:
@@ -284,6 +279,7 @@ class ExecutionScreen(Screen):
         entry.completion += int(payload.get("completion_tokens", 0) or 0)
         entry.total += int(payload.get("total_tokens", 0) or 0)
         entry.calls += 1
+        entry.window = int(payload.get("prompt_tokens", 0) or 0)
         self._grand_total += int(payload.get("total_tokens", 0) or 0)
         self._render_tokens()
 
@@ -324,6 +320,3 @@ class ExecutionScreen(Screen):
 
     def _tokens_log(self) -> RichLog:
         return self.query_one("#tokens-content", RichLog)
-
-    def _sidebar_log(self) -> RichLog:
-        return self.query_one("#sidebar-content", RichLog)

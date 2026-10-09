@@ -5,7 +5,7 @@ import tempfile
 from collections.abc import Iterable, Mapping
 from pathlib import Path
 
-from .workspace import isIgnored
+from .workspace import walk
 
 PREFIX = "gridllm-sandbox-"
 
@@ -61,9 +61,7 @@ class Sandbox:
 
 def snapshot(root: Path, ignore: Iterable[str]) -> dict[str, tuple[int, int]]:
     seen: dict[str, tuple[int, int]] = {}
-    for item in root.rglob("*"):
-        if isIgnored(item, root, ignore):
-            continue
+    for item in walk(root, root, ignore):
         if item.suffix.lower() in ARTIFACT_SUFFIXES:
             continue
         try:

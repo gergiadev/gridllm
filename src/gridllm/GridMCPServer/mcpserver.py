@@ -30,6 +30,7 @@ class GridMCPServer:
         shellTimeout: int = 60,
         ignore: Iterable[str] = DEFAULT_IGNORE,
         maxToolChars: int = DEFAULT_MAX_TOOL_CHARS,
+        secretEnv: Iterable[str] = (),
     ):
         self.workspace = Path(workspace).resolve()
         self.maxBytes = maxBytes
@@ -44,7 +45,15 @@ class GridMCPServer:
         self.scope = WriteScope(self.workspace)
         self.sandbox = Sandbox(self.workspace, self.ignore)
         self.tools = Tools(
-            self.workspace, reader, maxBytes, shellTimeout, self.ignore, self.logger, self.sandbox, self.scope
+            self.workspace,
+            reader,
+            maxBytes,
+            shellTimeout,
+            self.ignore,
+            self.logger,
+            self.sandbox,
+            self.scope,
+            secretEnv,
         )
         self.writeTools = self._registerTools()
         if self.writeTools != set(WRITE_TOOLS):

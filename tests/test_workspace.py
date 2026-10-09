@@ -3,7 +3,14 @@ from pathlib import Path
 import pytest
 from mcp import MCPError
 
-from gridllm.GridMCPServer.workspace import isIgnored, relPath, resolveSafe, writeAtomic
+from gridllm.GridMCPServer.workspace import (
+    isIgnored,
+    readLines,
+    relPath,
+    resolveSafe,
+    walk,
+    writeAtomic,
+)
 
 
 @pytest.fixture
@@ -60,3 +67,25 @@ def test_write_atomic_replaces_existing_content(workspace):
     target = workspace / "src" / "vm.c"
     writeAtomic(target, "int y;\n")
     assert target.read_text(encoding="utf-8") == "int y;\n"
+
+
+def test_write_atomic_keeps_the_mode_of_the_file_it_replaces(workspace):
+    target = workspace / "run.sh"
+    target.write_text("#!/bin/sh\n", encoding="utf-8")
+    target.chmod(0o755)
+    writeAtomic(target, "#!/bin/sh\necho hi\n")
+    assert target.stat().st_mode & 0o777 == 0o755
+
+
+def test_walk_does_not_descend_into_ignored_directories(workspace):
+    (workspace / ".git" / "objects").mkdir(parents=True)
+    (workspace / ".git" / "objects" / "blob").write_text("x", encoding="utf-8")
+    found = [relPath(path, workspace) for path in walk(workspace, workspace, (".git",))]
+    assert found == ["src", "src/vm.c"]
+
+
+def test_read_lines_returns_the_window_and_the_total(workspace):
+    target = workspace / "long.txt"
+    target.write_text("".join(f"line{n}\n" for n in range(1, 11)), encoding="utf-8")
+    assert readLines(target, 2, 2) == (["line3", "line4"], 10)
+    assert readLines(target, 8, 0) == (["line9", "line10"], 10)

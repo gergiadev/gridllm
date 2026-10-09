@@ -1,6 +1,7 @@
 import os
 import re
-import tempfile
+import secrets
+import shutil
 from collections.abc import Iterable
 from fnmatch import fnmatch
 from pathlib import Path
@@ -53,6 +54,27 @@ def isIgnored(target: Path, root: Path, patterns: Iterable[str]) -> bool:
     return any(fnmatch(part, pattern) for part in parts for pattern in patterns)
 
 
+def walk(base: Path, root: Path, patterns: Iterable[str]) -> list[Path]:
+    patterns = tuple(patterns)
+    found: list[Path] = []
+    for current, dirs, files in os.walk(base):
+        here = Path(current)
+        dirs[:] = [name for name in dirs if not isIgnored(here / name, root, patterns)]
+        found.extend(here / name for name in dirs)
+        found.extend(here / name for name in files if not isIgnored(here / name, root, patterns))
+    return sorted(found)
+
+
+def readLines(target: Path, start: int, limit: int) -> tuple[list[str], int]:
+    selected: list[str] = []
+    total = 0
+    with target.open(encoding="utf-8") as handle:
+        for total, line in enumerate(handle, start=1):
+            if total > start and (limit <= 0 or len(selected) < limit):
+                selected.append(line.rstrip("\n"))
+    return selected, total
+
+
 def statEntry(target: Path) -> dict:
     stat = target.stat()
     return {
@@ -65,14 +87,13 @@ def statEntry(target: Path) -> dict:
 
 def writeAtomic(target: Path, content: str) -> int:
     target.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmpPath = tempfile.mkstemp(
-        prefix=".tmp_",
-        dir=str(target.parent),
-        text=True,
-    )
+    tmpPath = target.with_name(f".tmp_{secrets.token_hex(8)}")
+    fd = os.open(tmpPath, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(content)
+        if target.exists():
+            shutil.copymode(target, tmpPath)
         os.replace(tmpPath, target)
     except Exception:
         try:
@@ -97,4 +118,7 @@ def expandBraces(pattern: str) -> list[str]:
 
 def matchesInclude(relative: str, patterns: Iterable[str]) -> bool:
     name = relative.rsplit("/", 1)[-1]
-    return any(fnmatch(relative, pattern) or fnmatch(name, pattern) for pattern in patterns)
+    return any(
+        fnmatch(relative, pattern) or fnmatch(name, pattern) or fnmatch(relative, pattern.replace("**/", ""))
+        for pattern in patterns
+    )

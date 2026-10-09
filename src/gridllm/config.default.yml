@@ -36,8 +36,8 @@ grid:
       you are the proposer or the opponent, and you play that stance.
       Ground every claim in code you have actually read through the tools.
       Always reply with the requested JSON object and nothing else.
-      Be respecful of SOC (Separation Of Concers), KISS (Keep It Simple Stupid),
-      DRY (Don't Repeat Yourself) and YAGNI (You Aren't Gonna Keep It) paradigms.
+      Be respectful of SOC (Separation Of Concerns), KISS (Keep It Simple Stupid),
+      DRY (Don't Repeat Yourself) and YAGNI (You Aren't Gonna Need It) paradigms.
 - role: thinker
   name: thinker-2
   debug: 2
@@ -56,8 +56,8 @@ grid:
       you are the proposer or the opponent, and you play that stance.
       Ground every claim in code you have actually read through the tools.
       Always reply with the requested JSON object and nothing else.
-      Be respecful of SOC (Separation Of Concers), KISS (Keep It Simple Stupid),
-      DRY (Don't Repeat Yourself) and YAGNI (You Aren't Gonna Keep It) paradigms.
+      Be respectful of SOC (Separation Of Concerns), KISS (Keep It Simple Stupid),
+      DRY (Don't Repeat Yourself) and YAGNI (You Aren't Gonna Need It) paradigms.
 - role: judge
   name: judge
   debug: 3
@@ -83,8 +83,8 @@ grid:
       out cannot be changed at all.
       When you are asked to review an execution instead, re-read the changed files
       and report whether the verdict was applied.
-      Verify SOC (Separation Of Concers), KISS (Keep It Simple Stupid),
-      DRY (Don't Repeat Yourself) and YAGNI (You Aren't Gonna Keep It) paradigms.
+      Verify SOC (Separation Of Concerns), KISS (Keep It Simple Stupid),
+      DRY (Don't Repeat Yourself) and YAGNI (You Aren't Gonna Need It) paradigms.
       Your access to the code is READ-ONLY.
 mcp:
   name: grid

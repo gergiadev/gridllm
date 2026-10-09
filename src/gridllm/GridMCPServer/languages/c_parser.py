@@ -113,17 +113,19 @@ def _entry(node: tree_sitter.Node, sourceBytes: bytes, kind: str, name: str) -> 
     }
 
 
+def _collectTag(node: tree_sitter.Node, sourceBytes: bytes, acc: list[dict]) -> None:
+    nameNode = node.child_by_field_name("name")
+    if nameNode is not None:
+        acc.append(_entry(node, sourceBytes, _TAGGED_KINDS[node.type], _text(nameNode, sourceBytes)))
+    body = node.child_by_field_name("body")
+    if body is not None and node.type == "enum_specifier":
+        _collectEnumerators(body, sourceBytes, acc)
+
+
 def _collectTagged(node: tree_sitter.Node, sourceBytes: bytes, acc: list[dict]) -> None:
     for child in node.children:
-        kind = _TAGGED_KINDS.get(child.type)
-        if kind is None:
-            continue
-        nameNode = child.child_by_field_name("name")
-        if nameNode is not None:
-            acc.append(_entry(child, sourceBytes, kind, _text(nameNode, sourceBytes)))
-        body = child.child_by_field_name("body")
-        if body is not None and child.type == "enum_specifier":
-            _collectEnumerators(body, sourceBytes, acc)
+        if child.type in _TAGGED_KINDS:
+            _collectTag(child, sourceBytes, acc)
 
 
 def _collectEnumerators(body: tree_sitter.Node, sourceBytes: bytes, acc: list[dict]) -> None:
@@ -162,6 +164,8 @@ def _walk(node: tree_sitter.Node, sourceBytes: bytes, acc: list[dict]) -> None:
             _collectTypedef(child, sourceBytes, acc)
         elif kind == "declaration":
             _collectDeclaration(child, sourceBytes, acc)
+        elif kind in _TAGGED_KINDS:
+            _collectTag(child, sourceBytes, acc)
         elif kind in _MACRO_KINDS:
             nameNode = child.child_by_field_name("name")
             if nameNode is not None:

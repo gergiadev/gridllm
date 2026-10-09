@@ -21,6 +21,10 @@ _SHORTHAND_SECTION_RE = re.compile(r"^\s*\.(text|data|bss|rodata)\b")
 
 _GLOBAL_RE = re.compile(rf"^\s*\.(?:globl|global)\s+({_NAME})")
 
+_DEFINE_RE = re.compile(rf"^\s*#\s*define\s+({_NAME})")
+
+_LOCAL_PREFIX = ".L"
+
 _SIZE_RE = re.compile(r"^\s*\.(?:size|endfunc|end)\b")
 
 _COMMENT_RE = re.compile(
@@ -28,7 +32,7 @@ _COMMENT_RE = re.compile(
     r"/[*].*[*]/"
     r"|/[*].*"
     r"|//.*"
-    r"|\#.*"
+    r"|\#(?!\s*define\b).*"
     r"|;.*"
     r"|@.*"
     r"|\*.*"
@@ -78,7 +82,7 @@ def _scanLine(line: str, lineNum: int, lines: list[str], index: int) -> list[dic
     doc = _precedingComment(lines, index)
     found: list[dict] = []
 
-    match = _EQU_RE.match(line)
+    match = _DEFINE_RE.match(line) or _EQU_RE.match(line)
     if match:
         return [_entry("constant", match.group(1), lineNum, signature, doc)]
 
@@ -110,7 +114,9 @@ def _lastMeaningfulLine(lines: list[str]) -> int:
 
 def _closeRanges(acc: list[dict], lines: list[str]) -> None:
     boundaries = sorted(
-        entry["line"] for entry in acc if entry["kind"] in _BOUNDARY_KINDS
+        entry["line"]
+        for entry in acc
+        if entry["kind"] in _BOUNDARY_KINDS and not entry["name"].startswith(_LOCAL_PREFIX)
     )
     terminators = sorted(
         index + 1 for index, line in enumerate(lines) if _SIZE_RE.match(line)

@@ -78,3 +78,30 @@ def test_section_and_global_directives_are_reported(parser):
 def test_comment_only_and_empty_source_yield_nothing(parser):
     assert parser.listSymbols("") == []
     assert parser.listSymbols("# just a comment\n\n; another\n") == []
+
+
+PREPROCESSED = """\
+#define MAGIC 0x10
+#include "regs.h"
+    .globl main
+main:
+    push %rbp
+.Lloop:
+    dec %eax
+    jnz .Lloop
+    ret
+helper:
+    ret
+"""
+
+
+def test_a_local_label_does_not_end_the_enclosing_body(parser):
+    main = next(s for s in parser.listSymbols(PREPROCESSED) if s["name"] == "main" and s["kind"] == "label")
+    assert (main["line"], main["endLine"]) == (4, 9)
+    assert named(parser.listSymbols(PREPROCESSED), ".Lloop")
+
+
+def test_a_preprocessor_define_is_a_constant_and_an_include_is_not(parser):
+    symbols = parser.listSymbols(PREPROCESSED)
+    assert named(symbols, "MAGIC")[0]["kind"] == "constant"
+    assert not named(symbols, "include")

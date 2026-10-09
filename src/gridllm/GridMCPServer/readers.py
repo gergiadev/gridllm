@@ -6,7 +6,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Iterable
 from pathlib import Path
 
-from .workspace import isIgnored, matchesInclude
+from .workspace import isIgnored, matchesInclude, walk
 
 RTK = "rtk"
 RG = "rg"
@@ -64,9 +64,7 @@ class NativeReader(Reader):
             return [_buildEntry(base, root, base.stat())]
 
         entries: list[dict] = []
-        for item in sorted(base.rglob("*")):
-            if not self.keep(item, root):
-                continue
+        for item in walk(base, root, self.ignore):
             try:
                 stat = item.stat()
             except OSError:
@@ -81,8 +79,8 @@ class NativeReader(Reader):
     ) -> list[dict]:
         pattern = re.compile(query) if isRegex else re.compile(re.escape(query))
         results: list[dict] = []
-        for file in sorted(base.rglob("*")):
-            if not file.is_file() or not self.keep(file, root):
+        for file in walk(base, root, self.ignore):
+            if not file.is_file():
                 continue
             if include and not matchesInclude(file.relative_to(root).as_posix(), include):
                 continue
@@ -138,7 +136,8 @@ class RipgrepReader(_GrepReader):
             outcome = subprocess.run(
                 args,
                 capture_output=True,
-                text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=self.timeout,
                 check=False,
             )
@@ -165,7 +164,8 @@ class GrepReader(_GrepReader):
             outcome = subprocess.run(
                 args,
                 capture_output=True,
-                text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=self.timeout,
                 check=False,
             )
@@ -186,8 +186,8 @@ def _splitRecord(line: str) -> tuple[str, str] | None:
 
 def _parseGrepOutput(stdout: str, root: Path) -> list[dict]:
     results: list[dict] = []
-    for line in stdout.splitlines():
-        record = _splitRecord(line)
+    for line in stdout.split("\n"):
+        record = _splitRecord(line.rstrip("\r"))
         if record is None:
             continue
         path_part, rest = record
@@ -229,7 +229,8 @@ class RtkReader(Reader):
         outcome = subprocess.run(
             [RTK, *args],
             capture_output=True,
-            text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=self.timeout,
             check=False,
         )

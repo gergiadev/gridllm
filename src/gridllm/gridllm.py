@@ -6,7 +6,9 @@ import socket
 import threading
 import time
 
+import yaml
 from dotenv import load_dotenv
+from pydantic import ValidationError
 
 from . import paths
 from .compaction import Compactor
@@ -22,6 +24,18 @@ LOG_FILE = "grid.log"
 
 def _serve(server: GridMCPServer, config: GridConfig) -> None:
     server.run(transport="streamable-http", host=config.mcp.host, port=config.mcp.port)
+
+
+def _ensure_port_free(host: str, port: int) -> None:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            probe.bind((host, port))
+        except OSError as error:
+            raise SystemExit(
+                f"cannot start the MCP server on {host}:{port}: {error}\n"
+                "another gridllm may be running: stop it or change mcp.port in the configuration"
+            ) from error
 
 
 def _wait_for_port(host: str, port: int, timeout: float = 10.0) -> None:
@@ -84,10 +98,19 @@ async def _build_grid(config: GridConfig, scope=None, bus: EventBus | None = Non
 
     await _probe_tool_channels(grid)
 
-    return Grid(worker=worker, thinkers=thinkers, judge=judge, settings=config.debate, bus=bus, scope=scope)
+    return Grid(
+        worker=worker,
+        thinkers=thinkers,
+        judge=judge,
+        settings=config.debate,
+        bus=bus,
+        scope=scope,
+        ignore=tuple(config.mcp.ignore),
+    )
 
 
 def _start_server(config: GridConfig) -> GridMCPServer:
+    _ensure_port_free(config.mcp.host, config.mcp.port)
     server = GridMCPServer(
         config.mcp.name,
         config.access_from_agent(),
@@ -97,6 +120,7 @@ def _start_server(config: GridConfig) -> GridMCPServer:
         shellTimeout=config.mcp.shell_timeout,
         ignore=config.mcp.ignore,
         maxToolChars=config.mcp.max_tool_chars,
+        secretEnv=config.secret_env(),
     )
     threading.Thread(target=_serve, args=(server, config), daemon=True).start()
     atexit.register(server.sandbox.remove)
@@ -145,6 +169,8 @@ async def _run_plain(config: GridConfig, task: str) -> None:
     server = _start_server(config)
     grid = await _build_grid(config, scope=server.scope, bus=None)
     print(await grid.run(task))
+    if not grid.approved:
+        raise SystemExit(1)
 
 
 async def _run_tui(config: GridConfig, task: str, run_tui) -> None:
@@ -160,12 +186,14 @@ def main() -> None:
 
     load_dotenv(paths.env_path())
     setup_logging(str(paths.log_dir()), LOG_FILE)
-    config = load_config(paths.config_path())
-
-    if use_tui:
-        asyncio.run(_run_tui(config, task, _load_tui()))
-    else:
-        asyncio.run(_run_plain(config, task))
+    try:
+        config = load_config(paths.config_path())
+        if use_tui:
+            asyncio.run(_run_tui(config, task, _load_tui()))
+        else:
+            asyncio.run(_run_plain(config, task))
+    except (ValidationError, yaml.YAMLError, RuntimeError) as error:
+        raise SystemExit(f"gridllm: {error}") from error
 
 
 if __name__ == "__main__":

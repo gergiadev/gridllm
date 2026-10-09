@@ -1,7 +1,6 @@
 from mcp import Client, MCPError
 
 from ..events import KIND_TOOL_CALL, KIND_TOOL_RESULT, EventBus
-from ..GridMCPServer.permissions import WRITE_TOOLS
 from ..logging_setup import Tracer, traced
 
 
@@ -12,7 +11,6 @@ class Toolbox:
         self.trace = trace
         self.agent = agent
         self.bus = bus
-        self.touched: set[str] = set()
 
     @traced
     async def schemas(self) -> list[dict]:
@@ -42,11 +40,9 @@ class Toolbox:
                 return self._failed(name, error)
 
             if result.is_error:
-                return self._failed(name, result.content)
+                return self._failed(name, _text(result.content))
 
-            content = "\n".join(block.text for block in result.content if hasattr(block, "text"))
-            if name in WRITE_TOOLS and arguments.get("path"):
-                self.touched.add(str(arguments["path"]))
+            content = _text(result.content)
             self.trace.result(name, content)
             EventBus.emit_to(self.bus, KIND_TOOL_RESULT, {"name": name, "content": content[:2000]}, self.agent)
             return content
@@ -56,3 +52,7 @@ class Toolbox:
         self.trace.result(name, message, error=True)
         EventBus.emit_to(self.bus, KIND_TOOL_RESULT, {"name": name, "content": message, "error": True}, self.agent)
         return message
+
+
+def _text(blocks) -> str:
+    return "\n".join(block.text for block in blocks if hasattr(block, "text"))

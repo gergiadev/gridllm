@@ -19,6 +19,8 @@ from .toolbox import Toolbox
 
 FORCE_FINAL_MARGIN = 3
 
+NUM_RETRIES = 3
+
 MAX_ARGUMENT_CHARS = 120
 
 FORCE_FINAL_SYSTEM = (
@@ -138,7 +140,7 @@ class LLMClient:
         self.trace.prompt(f"exhausted {max_rounds} tool rounds, asking for a final answer with no tools")
         message = await self._complete(self._inject_force_final(messages), None)
         self._trace_thinking(message)
-        if message.tool_calls or not message.content:
+        if message.tool_calls:
             raise AgentError(f"{self.name}: exceeded {max_rounds} tool rounds without an answer")
         return await self._finalize(message.content, schema)
 
@@ -148,7 +150,9 @@ class LLMClient:
         if thinking:
             EventBus.emit_to(self.bus, KIND_LLM_THINKING, {"thinking": thinking}, self.name)
 
-    async def _finalize(self, content: str, schema: type[BaseModel] | None):
+    async def _finalize(self, content: str | None, schema: type[BaseModel] | None):
+        if not (content or "").strip():
+            raise AgentError(f"{self.name}: the model returned an empty answer")
         result = await self._parse(content, schema)
         EventBus.emit_to(self.bus, KIND_LLM_RESPONSE, {"content": content, "result": _safe_dump(result)}, self.name)
         return result
@@ -162,17 +166,24 @@ class LLMClient:
 
     @traced
     async def _complete(self, messages: list[dict], tools: list[dict] | None):
+        choice = await self._request(messages, tools, self.params.max_output_tokens)
+        if choice.finish_reason == "length":
+            raise AgentError(f"{self.name}: answer truncated at max_output_tokens")
+        return choice.message
+
+    async def _request(self, messages: list[dict], tools: list[dict] | None, max_tokens: int):
         response = await acompletion(
             model=self.params.model,
             api_base=self.params.api_base,
             api_key=self.params.api_key,
             temperature=self.params.temperature,
-            max_tokens=self.params.max_output_tokens,
+            max_tokens=max_tokens,
             messages=messages,
             tools=tools or None,
+            num_retries=NUM_RETRIES,
         )
         _emit_usage(self.bus, self.name, response)
-        return response.choices[0].message
+        return response.choices[0]
 
     @traced
     async def _parse(self, content: str, schema: type[BaseModel] | None):
@@ -198,19 +209,11 @@ class LLMClient:
     async def plain(self, system: str, prompt: str, max_tokens: int) -> str:
         self.trace.prompt(prompt)
         EventBus.emit_to(self.bus, KIND_LLM_CALL, {"prompt": prompt, "schema": None}, self.name)
-        response = await acompletion(
-            model=self.params.model,
-            api_base=self.params.api_base,
-            api_key=self.params.api_key,
-            temperature=self.params.temperature,
-            max_tokens=max_tokens,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": prompt},
-            ],
-        )
-        _emit_usage(self.bus, self.name, response)
-        content = response.choices[0].message.content
+        messages = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": prompt},
+        ]
+        content = (await self._request(messages, None, max_tokens)).message.content
         EventBus.emit_to(self.bus, KIND_LLM_RESPONSE, {"content": content, "result": None}, self.name)
         return content
 

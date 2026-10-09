@@ -1,6 +1,7 @@
 import asyncio
 import functools
 import os
+import shutil
 import signal
 from collections.abc import Callable, Iterable
 from pathlib import Path
@@ -17,12 +18,17 @@ from .rtkshell import RTK, RTK_COMMANDS, rewriteCommand, rtkAvailable
 from .sandbox import Sandbox, modified, snapshot
 from .workspace import (
     expandBraces,
-    isIgnored,
+    readLines,
     relPath,
     resolveSafe,
     statEntry,
+    walk,
     writeAtomic,
 )
+
+GIT = "git"
+
+GIT_TIMEOUT = 30
 
 
 async def _terminateGroup(proc) -> None:
@@ -60,6 +66,7 @@ class Tools:
         logger=None,
         sandbox: Sandbox | None = None,
         scope=None,
+        secretEnv: Iterable[str] = (),
     ):
         self.workspace = workspace
         self.reader = reader
@@ -69,6 +76,7 @@ class Tools:
         self.logger = logger
         self.sandbox = sandbox
         self.scope = scope
+        self.secretEnv = frozenset(secretEnv)
         self.rtk = rtkAvailable()
         if logger:
             if self.rtk:
@@ -78,6 +86,8 @@ class Tools:
 
     def _collectSourceFiles(self, target: Path) -> list[Path]:
         extensions = supported_extensions()
+        if not target.exists():
+            raise MCPError(INVALID_PARAMS, f"no such file or directory: {relPath(target, self.workspace)}")
         if target.is_file():
             if target.suffix.lower() not in extensions:
                 raise MCPError(
@@ -87,10 +97,8 @@ class Tools:
             return [target]
         return [
             path
-            for path in sorted(target.rglob("*"))
-            if path.suffix.lower() in extensions
-            and path.is_file()
-            and not isIgnored(path, self.workspace, self.ignore)
+            for path in walk(target, self.workspace, self.ignore)
+            if path.suffix.lower() in extensions and path.is_file()
         ]
 
     async def _offload(self, fn: Callable, *args):
@@ -126,23 +134,21 @@ class Tools:
         offset: 1-based line number to start reading from (0 or 1 means beginning).
         limit: maximum number of lines to return (0 means no limit).
 
-        Fails if path is a directory, does not exist, is not valid UTF-8, or is
-        larger than the configured size limit.
+        Fails if path is a directory, does not exist or is not valid UTF-8. A
+        file larger than the configured size limit can only be read through
+        offset and limit.
         """
         target = resolveSafe(self.workspace, path)
         if target.is_dir():
             raise MCPError(INVALID_PARAMS, f"is a directory, not a file: {path}")
-        content = await self._offload(self.reader.read, target, self.maxBytes)
-        if offset > 1 or limit > 0:
-            all_lines = content.splitlines()
-            start = max(0, offset - 1) if offset > 0 else 0
-            end = start + limit if limit > 0 else len(all_lines)
-            selected = all_lines[start:end]
-            if not selected:
-                last = start + limit if limit > 0 else len(all_lines)
-                return f"(lines {start + 1}-{last} out of range; file has {len(all_lines)} lines)"
-            return "\n".join(selected)
-        return content
+        if offset <= 1 and limit <= 0:
+            return await self._offload(self.reader.read, target, self.maxBytes)
+        start = max(0, offset - 1)
+        selected, total = await self._offload(readLines, target, start, limit)
+        if not selected:
+            last = start + limit if limit > 0 else total
+            return f"(lines {start + 1}-{last} out of range; file has {total} lines)"
+        return "\n".join(selected)
 
     async def write_file(self, path: str, content: str) -> str:
         """Create a file, or replace an existing one, with content.
@@ -279,6 +285,7 @@ class Tools:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 cwd=str(target),
+                env={key: value for key, value in os.environ.items() if key not in self.secretEnv},
                 start_new_session=True,
             )
             try:
@@ -332,6 +339,27 @@ class Tools:
             "may differ from what was there before."
         )
 
+    async def _git(self, *args: str) -> str:
+        if shutil.which(GIT) is None:
+            raise MCPError(INVALID_PARAMS, "git is not available")
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                GIT,
+                *args,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+                cwd=str(self.workspace),
+                start_new_session=True,
+            )
+        except OSError as exc:
+            raise MCPError(INVALID_PARAMS, f"git {args[0]} failed: {exc}") from exc
+        try:
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=GIT_TIMEOUT)
+        except TimeoutError as exc:
+            await _terminateGroup(proc)
+            raise MCPError(INVALID_PARAMS, f"git {args[0]} timed out") from exc
+        return stdout.decode("utf-8", errors="replace").strip()
+
     async def git_diff(self, staged: bool = False) -> str:
         """Show unstaged diffs in the workspace.
 
@@ -343,26 +371,10 @@ class Tools:
         Returns the output of 'git diff' (unified diff format). Returns
         "(no changes)" if the workspace is clean.
         """
-        import shutil
-        if shutil.which("git") is None:
-            raise MCPError(INVALID_PARAMS, "git is not available")
-        try:
-            args = ["git", "diff", "--no-color"]
-            if staged:
-                args.append("--staged")
-            proc = await asyncio.create_subprocess_exec(
-                *args,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
-                cwd=str(self.workspace),
-            )
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
-        except TimeoutError:
-            raise MCPError(INVALID_PARAMS, "git diff timed out")
-        except OSError as exc:
-            raise MCPError(INVALID_PARAMS, f"git diff failed: {exc}")
-        output = stdout.decode("utf-8", errors="replace").strip()
-        return output or "(no changes)"
+        args = ["diff", "--no-color"]
+        if staged:
+            args.append("--staged")
+        return await self._git(*args) or "(no changes)"
 
     async def git_log(self, path: str = "", limit: int = 10) -> str:
         """Show recent commit history for a file or the whole workspace.
@@ -374,27 +386,10 @@ class Tools:
 
         Returns the output of 'git log --oneline'.
         """
-        import shutil
-        if shutil.which("git") is None:
-            raise MCPError(INVALID_PARAMS, "git is not available")
-        try:
-            args = ["git", "log", "--oneline", "--no-color", f"-n{max(1, limit)}"]
-            if path:
-                target = resolveSafe(self.workspace, path)
-                args.append(str(target))
-            proc = await asyncio.create_subprocess_exec(
-                *args,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
-                cwd=str(self.workspace),
-            )
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
-        except TimeoutError:
-            raise MCPError(INVALID_PARAMS, "git log timed out")
-        except OSError as exc:
-            raise MCPError(INVALID_PARAMS, f"git log failed: {exc}")
-        output = stdout.decode("utf-8", errors="replace").strip()
-        return output or "(no commits)"
+        args = ["log", "--oneline", "--no-color", f"-n{max(1, limit)}"]
+        if path:
+            args.append(str(resolveSafe(self.workspace, path)))
+        return await self._git(*args) or "(no commits)"
 
     async def git_blame(self, path: str, startLine: int = 0, endLine: int = 0) -> str:
         """Show line-by-line authorship for a file.
@@ -407,34 +402,12 @@ class Tools:
 
         Returns the output of 'git blame' for the selected range.
         """
-        import shutil
-        if shutil.which("git") is None:
-            raise MCPError(INVALID_PARAMS, "git is not available")
-        try:
-            target = resolveSafe(self.workspace, path)
-            if startLine > 0 and endLine > 0:
-                range_arg = f"-L{startLine},{endLine}"
-            elif startLine > 0:
-                range_arg = f"-L{startLine},"
-            else:
-                range_arg = None
-            args = ["git", "blame", "--no-color"]
-            if range_arg:
-                args.append(range_arg)
-            args.append(str(target))
-            proc = await asyncio.create_subprocess_exec(
-                *args,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
-                cwd=str(self.workspace),
-            )
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
-        except TimeoutError:
-            raise MCPError(INVALID_PARAMS, "git blame timed out")
-        except OSError as exc:
-            raise MCPError(INVALID_PARAMS, f"git blame failed: {exc}")
-        output = stdout.decode("utf-8", errors="replace").strip()
-        return output or "(no output)"
+        target = resolveSafe(self.workspace, path)
+        args = ["blame", "--no-color"]
+        if startLine > 0:
+            args.append(f"-L{startLine},{endLine if endLine > 0 else ''}")
+        args.append(str(target))
+        return await self._git(*args) or "(no output)"
 
     async def _overSources(self, path: str, extract: Callable[[SourceParser, str], list[dict]]) -> str:
         target = resolveSafe(self.workspace, path)
@@ -475,19 +448,20 @@ class Tools:
         """Outline the classes, functions, methods and variables of source files.
 
         Use this to understand a file or a package without reading it in full.
-        Only C (.c, .h), Python and PHP sources are parsed; other files are
-        ignored.
+        C (.c, .h), Assembly (.s, .S, .asm), Python and PHP sources are parsed;
+        other files are ignored.
 
         path: source file or directory relative to the workspace root; defaults
             to the whole workspace.
 
         Returns one JSON object per line with "kind" (function, variable, const,
         class, method, the C-only struct, union, enum, typedef, macro,
-        prototype, and the PHP-only interface, trait, property, use), "name",
+        prototype, the Assembly-only label, constant, section, global, and the
+        PHP-only interface, trait, property, use), "name",
         "line" and "endLine" (1-based, inclusive), "signature", the "docstring"
         if any, and "file" relative to the workspace root. Returns "(no
-        symbols)" if nothing is found. Files that fail to parse are skipped
-        silently.
+        symbols)" if nothing is found. Files that could not be parsed are
+        listed in a trailing warning.
         """
         return await self._overSources(path, lambda parser, source: parser.listSymbols(source))
 
@@ -495,8 +469,8 @@ class Tools:
         """Locate where a symbol is defined, by exact name.
 
         Use this to jump straight to a definition instead of searching text.
-        Only C (.c, .h), Python and PHP sources are parsed; other files are
-        ignored.
+        C (.c, .h), Assembly (.s, .S, .asm), Python and PHP sources are parsed;
+        other files are ignored.
 
         name: exact symbol name, case sensitive. Give the bare name, without a
             class prefix or parentheses.
@@ -515,8 +489,9 @@ class Tools:
         """Return the full source text of a class or function, by exact name.
 
         Prefer this over read_file when you need to inspect one definition in a
-        large file. Only C (.c, .h), Python and PHP sources are parsed; other
-        files are ignored.
+        large file. C (.c, .h), Assembly (.s, .S, .asm), Python and PHP
+        sources are parsed; other files are ignored. For an Assembly label the
+        body runs up to the next non-local label.
 
         name: exact symbol name, case sensitive.
         path: source file or directory relative to the workspace root; defaults

@@ -21,9 +21,14 @@ _LEAF_KINDS = ("function_definition", "method_declaration")
 
 _CONTAINER_KINDS = ("class_declaration", "interface_declaration", "trait_declaration")
 
+_SCOPE_KINDS = (*_LEAF_KINDS, *_CONTAINER_KINDS, "anonymous_function")
+
+_ELEMENT_KINDS = {
+    "const_declaration": ("const", "const_element"),
+    "property_declaration": ("property", "property_element"),
+}
+
 _PATTERN_KINDS = {
-    "const_declaration": ("const", r"const\s+([A-Za-z_][A-Za-z0-9_]*)"),
-    "property_declaration": ("property", r"\$([A-Za-z_][A-Za-z0-9_]*)"),
     "use_declaration": ("use", r"use\s+([A-Za-z_\\][A-Za-z0-9_\\]*)"),
 }
 
@@ -105,6 +110,11 @@ def _walkFunctions(
 
     if kind in _CONTAINER_KINDS:
         _collectNamed(node, sourceBytes, _NAMED_KINDS[kind], acc)
+    elif kind in _ELEMENT_KINDS:
+        label, element = _ELEMENT_KINDS[kind]
+        for child in node.children:
+            if child.type == element:
+                _collectEntry(node, sourceBytes, label, _nodeText(child.children[0], sourceBytes).lstrip("$"), acc)
     elif kind in _PATTERN_KINDS:
         label, pattern = _PATTERN_KINDS[kind]
         match = re.search(pattern, _nodeText(node, sourceBytes))
@@ -121,6 +131,8 @@ def _walkGlobalVars(
     sourceBytes: bytes,
     acc: list[dict],
 ) -> None:
+    if node.type in _SCOPE_KINDS:
+        return
     if node.type == "expression_statement":
         for child in node.children:
             if child.type == "assignment_expression" and child.children:

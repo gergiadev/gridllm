@@ -175,7 +175,7 @@ def _state(entry: TrackedObjection) -> str:
     return "OPEN"
 
 
-def _render_turn(turn: Turn, ledger: ObjectionLedger) -> list[str]:
+def _render_turn(turn: Turn, ledger: ObjectionLedger, full: bool = False) -> list[str]:
     head = f"[exchange {turn.exchange}] {turn.agent} as {turn.stance.value}"
 
     if turn.failed:
@@ -184,7 +184,7 @@ def _render_turn(turn: Turn, ledger: ObjectionLedger) -> list[str]:
     if turn.proposal is not None:
         lines = [
             f"{head} status={turn.proposal.status.value} confidence={turn.proposal.confidence:.2f}",
-            f"    proposal: {_clip(turn.proposal.solution)}",
+            f"    proposal: {turn.proposal.solution if full else _clip(turn.proposal.solution)}",
         ]
         for resolution in turn.proposal.resolves:
             lines.append(f"    resolves [{resolution.objection_id}]: {_clip(resolution.how)}")
@@ -206,7 +206,8 @@ def _render_turn(turn: Turn, ledger: ObjectionLedger) -> list[str]:
 def transcript(history: list[Turn], ledger: ObjectionLedger) -> str:
     if not history:
         return NO_TRANSCRIPT
-    return "\n".join(line for turn in history for line in _render_turn(turn, ledger))
+    latest = next((turn for turn in reversed(history) if turn.proposal is not None), None)
+    return "\n".join(line for turn in history for line in _render_turn(turn, ledger, turn is latest))
 
 
 def prompt(task: str, stance: Stance, history: list[Turn], ledger: ObjectionLedger) -> str:

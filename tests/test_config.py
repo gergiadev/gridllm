@@ -1,9 +1,10 @@
 from pathlib import Path
 
 import pytest
+import yaml
 from pydantic import ValidationError
 
-from gridllm.config import LLMParams, load_config
+from gridllm.config import DebateConfig, GridConfig, LLMParams, load_config
 
 DEFAULT_CONFIG = Path(__file__).resolve().parent.parent / "src" / "gridllm" / "config.default.yml"
 
@@ -68,3 +69,31 @@ def test_the_shipped_default_config_validates():
 def test_the_url_carries_the_agent_name():
     config = load_config(DEFAULT_CONFIG)
     assert config.mcp.url_for("worker").endswith("?agent=worker")
+
+
+def _grid_with(**changes) -> dict:
+    raw = yaml.safe_load(DEFAULT_CONFIG.read_text(encoding="utf-8"))
+    raw["grid"][1].update(changes)
+    return raw
+
+
+@pytest.mark.parametrize(
+    ("changes", "message"),
+    [
+        ({"name": "worker"}, "agent names must be unique"),
+        ({"name": "thinker 1"}, "String should match pattern"),
+        ({"access": "rw"}, "a thinker needs access 'r'"),
+    ],
+)
+def test_an_incoherent_grid_is_refused(changes, message):
+    with pytest.raises(ValidationError, match=message):
+        GridConfig.model_validate(_grid_with(**changes))
+
+
+def test_a_threshold_outside_the_unit_interval_is_refused():
+    with pytest.raises(ValidationError):
+        DebateConfig(confidence_threshold=80)
+
+
+def test_the_api_key_variables_are_the_secret_environment():
+    assert load_config(DEFAULT_CONFIG).secret_env() == {"OLLAMA_API_KEY", "DEEPSEEK_API_KEY"}
